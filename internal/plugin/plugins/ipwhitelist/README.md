@@ -1,113 +1,81 @@
-# IP 白名单插件 (IP Whitelist Plugin)
+# IP白名单插件（ip_whitelist）
 
-IP 白名单插件用于限制 API 访问，只允许指定的 IP 地址访问。
+## 一、概述
+IP白名单插件用于基于客户端IP地址控制访问权限，支持白名单和黑名单两种模式，保障API安全。
 
-## 功能特点
+## 二、设计目标
+1. 支持白名单和黑名单模式
+2. 支持灵活配置IP段和单个IP
+3. 支持自定义真实IP头
+4. 支持可信代理配置
+5. 完善的错误处理和日志记录
 
-- 🌐 支持 IP 地址白名单
-- 📝 支持 CIDR 格式
-- 🔄 动态更新白名单
-- ⚡ 高性能实现
-- 🛡️ 线程安全
+## 三、流程图
+1. 客户端发起请求
+2. 插件拦截请求
+3. 获取客户端真实IP
+4. 判断IP是否在白名单/黑名单
+5. 决定是否放行或拒绝
 
-## 配置说明
+## 四、配置参数
 
+| 名称                | 数据类型         | 必填 | 默认值         | 描述                         |
+|---------------------|----------------|------|----------------|------------------------------|
+| mode                | string         | 否   | whitelist      | 模式：whitelist/blacklist    |
+| ip_whitelist        | array of string| 否   | []             | IP白名单                     |
+| ip_blacklist        | array of string| 否   | []             | IP黑名单                     |
+| real_ip_header      | string         | 否   | X-Real-IP      | 真实IP头                     |
+| forwarded_for_header| string         | 否   | X-Forwarded-For| 转发IP头                     |
+| trusted_proxies     | array of string| 否   | []             | 可信代理                     |
+
+## 五、配置示例
+
+#### 白名单模式
 ```yaml
-plugins:
-  - name: ip_whitelist
-    enabled: true
-    order: 1
-    config:
-      # IP 白名单列表
-      ip_whitelist:
-        - 192.168.1.1
-        - 10.0.0.0/24
-        - 172.16.0.0/16
+- name: ip_whitelist
+  enabled: true
+  order: 10
+  config:
+    mode: whitelist
+    ip_whitelist:
+      - "192.168.1.0/24"
+      - "10.0.0.0/8"
+    real_ip_header: X-Real-IP
 ```
 
-## 白名单格式
-
-### 单个 IP
-- 支持 IPv4 和 IPv6
-- 示例：`192.168.1.1`
-
-### CIDR 格式
-- 支持网段表示
-- 示例：`10.0.0.0/24`
-
-## 使用示例
-
-1. 注册插件：
-```go
-ipWhitelistPlugin := ipwhitelist.New()
-pluginManager.Register(ipWhitelistPlugin)
-```
-
-2. 配置插件：
+#### 黑名单模式
 ```yaml
-plugins:
-  - name: ip_whitelist
-    enabled: true
-    order: 1
-    config:
-      ip_whitelist:
-        - 192.168.1.1
-        - 10.0.0.0/24
+- name: ip_whitelist
+  enabled: true
+  order: 10
+  config:
+    mode: blacklist
+    ip_blacklist:
+      - "192.168.1.100"
+      - "10.0.0.50"
+      - "172.16.0.100"
 ```
 
-3. 动态更新白名单：
-```go
-// 添加 IP
-plugin.AddIP("192.168.1.2")
+## 六、运行属性
+- 插件执行阶段：安全控制阶段
+- 插件执行优先级：10
 
-// 移除 IP
-plugin.RemoveIP("192.168.1.1")
-
-// 获取白名单
-whitelist := plugin.GetWhitelist()
+## 七、请求示例
+```bash
+curl http://localhost:8080/api/users
 ```
 
-## 访问控制
+## 八、处理流程
+1. 校验配置参数
+2. 获取客户端真实IP
+3. 判断IP是否在白名单/黑名单
+4. 决定是否放行或拒绝
 
-### 白名单为空
-- 允许所有 IP 访问
-- 适用于开发环境
+## 九、错误码
 
-### 白名单非空
-- 只允许白名单中的 IP 访问
-- 其他 IP 返回 403 错误
+| HTTP 状态码 | 出错信息           | 说明                   |
+|-------------|--------------------|------------------------|
+| 403         | Forbidden          | IP不在允许范围         |
 
-## 错误处理
-
-### IP 不在白名单中
-- 返回 403 Forbidden
-- 错误信息说明原因
-
-## 性能优化
-
-1. 内存管理
-   - 使用 sync.Map 存储白名单
-   - 避免频繁的内存分配
-   - 高效的 IP 匹配算法
-
-2. 并发处理
-   - 线程安全的实现
-   - 支持并发更新
-   - 最小化锁竞争
-
-## 注意事项
-
-1. 安全建议
-   - 定期更新白名单
-   - 使用最小权限原则
-   - 记录访问日志
-
-2. 配置建议
-   - 使用 CIDR 格式减少配置量
-   - 定期清理无效 IP
-   - 考虑使用动态更新
-
-3. 运维建议
-   - 监控白名单更新
-   - 记录拒绝访问日志
-   - 定期检查白名单有效性 
+## 十、插件配置
+在路由或全局plugins中添加`ip_whitelist`插件即可。 

@@ -1,171 +1,79 @@
-# 一致性校验插件 (Consistency Check Plugin)
+# 一致性校验插件（consistency）
 
-一致性校验插件用于验证请求和响应中关键字段的一致性，支持多种校验算法和灵活的配置选项。
+## 一、概述
+一致性校验插件用于对请求进行签名验证，确保数据完整性和防止重放攻击，支持多种签名算法和字段配置。
 
-## 功能特点
+## 二、设计目标
+1. 支持多种签名算法（如HMAC-SHA256）
+2. 支持自定义签名字段
+3. 支持时间戳和随机数校验
+4. 支持跳过部分路径和方法
+5. 完善的错误处理和日志记录
 
-- 🔒 支持请求和响应的一致性校验
-- 🔑 多种校验算法（HMAC-SHA256、MD5、RSA、ECDSA、Ed25519）
-- ⚙️ 可配置的校验字段
-- 🚫 校验失败时直接返回错误
-- 🔄 支持自定义签名字段名
-- 🛡️ 防重放攻击机制
-- ⏰ 请求时间戳验证
+## 三、流程图
+1. 客户端发起请求
+2. 插件拦截请求
+3. 收集签名字段
+4. 校验签名、时间戳、随机数
+5. 校验通过则放行，否则拒绝
 
-## 配置说明
+## 四、配置参数
+
+| 名称                | 数据类型         | 必填 | 默认值         | 描述                         |
+|---------------------|----------------|------|----------------|------------------------------|
+| algorithm           | string         | 否   | hmac-sha256    | 签名算法                     |
+| secret              | string         | 是   | -              | 密钥                         |
+| fields              | array of string| 是   | -              | 参与签名的字段               |
+| signature_field     | string         | 否   | X-Signature    | 签名头字段                   |
+| timestamp_field     | string         | 否   | X-Timestamp    | 时间戳字段                   |
+| nonce_field         | string         | 否   | X-Nonce        | 随机数字段                   |
+| timestamp_validity  | int            | 否   | 300            | 时间戳有效期（秒）            |
+| skip_paths          | array of string| 否   | []             | 跳过的路径                   |
+| skip_methods        | array of string| 否   | []             | 跳过的HTTP方法               |
+
+## 五、配置示例
 
 ```yaml
-plugins:
-  - name: consistency
-    enabled: true
-    order: 1
-    config:
-      # 校验算法：hmac-sha256、md5、rsa、ecdsa、ed25519
-      algorithm: hmac-sha256
-      
-      # 密钥（用于 HMAC-SHA256 和 MD5）
-      secret: your-secret-key
-      
-      # 公钥（用于 RSA、ECDSA、Ed25519）
-      public_key: |
-        -----BEGIN PUBLIC KEY-----
-        YOUR_PUBLIC_KEY_HERE
-        -----END PUBLIC KEY-----
-      
-      # 需要校验的字段
-      fields:
-        - timestamp
-        - nonce
-      
-      # 签名字段名
-      signature_field: X-Signature
-      
-      # 是否校验响应
-      check_response: false
-      
-      # 时间戳有效期（秒）
-      timestamp_validity: 300
+- name: consistency
+  enabled: true
+  order: 20
+  config:
+    algorithm: hmac-sha256
+    secret: your-secret-key
+    fields: [timestamp, nonce]
+    signature_field: X-Signature
+    timestamp_field: X-Timestamp
+    nonce_field: X-Nonce
+    timestamp_validity: 300
+    skip_paths: ["/health"]
+    skip_methods: ["GET", "HEAD"]
 ```
 
-## 校验算法
+## 六、运行属性
+- 插件执行阶段：安全控制阶段
+- 插件执行优先级：20
 
-### HMAC-SHA256
-- 使用 HMAC-SHA256 算法
-- 需要密钥
-- 安全性高
-
-### MD5
-- 使用 MD5 算法
-- 计算速度快
-- 适合简单场景
-
-### RSA
-- 使用 RSA 算法
-- 需要公钥
-- 支持数字签名验证
-
-### ECDSA
-- 使用椭圆曲线数字签名算法
-- 需要公钥
-- 安全性高，密钥长度短
-
-### Ed25519
-- 使用 Ed25519 算法
-- 需要公钥
-- 高性能，安全性高
-
-## 安全特性
-
-### 防重放攻击
-- 使用 nonce 机制
-- 记录已使用的 nonce
-- 自动清理过期的 nonce
-
-### 时间戳验证
-- 验证请求时间戳
-- 可配置时间戳有效期
-- 防止重放攻击
-
-## 使用示例
-
-1. 注册插件：
-```go
-consistencyPlugin := consistency.New()
-pluginManager.Register(consistencyPlugin)
-```
-
-2. 配置插件：
-```yaml
-plugins:
-  - name: consistency
-    enabled: true
-    order: 1
-    config:
-      algorithm: hmac-sha256
-      secret: your-secret-key
-      fields:
-        - timestamp
-        - nonce
-      signature_field: X-Signature
-      timestamp_validity: 300
-```
-
-3. 发送请求：
+## 七、请求示例
 ```bash
-curl -X POST http://localhost:8080/api \
-  -H "X-Timestamp: 1234567890" \
-  -H "X-Nonce: abc123" \
-  -H "X-Signature: calculated-signature" \
-  -d '{"data": "test"}'
+curl -H "X-Timestamp: 1640995200" \
+     -H "X-Nonce: abc123" \
+     -H "X-Signature: <签名值>" \
+     http://localhost:8080/api/users
 ```
 
-## 签名计算
+## 八、处理流程
+1. 校验配置参数
+2. 收集签名字段
+3. 校验签名、时间戳、随机数
+4. 校验通过则放行，否则拒绝
 
-### 请求签名
-1. 获取需要校验的字段值
-2. 按顺序拼接字段值（使用 & 连接）
-3. 使用配置的算法和密钥/公钥计算签名
+## 九、错误码
 
-### 响应签名
-1. 获取响应体内容
-2. 使用配置的算法和密钥/公钥计算签名
-3. 将签名添加到响应头
+| HTTP 状态码 | 出错信息           | 说明                   |
+|-------------|--------------------|------------------------|
+| 400         | Bad Signature      | 签名校验失败           |
+| 401         | Expired Timestamp  | 时间戳无效             |
+| 403         | Forbidden          | 签名字段缺失/不合法     |
 
-## 错误处理
-
-### 请求校验失败
-- 返回 400 Bad Request
-- 错误信息说明具体原因
-
-### 响应校验失败
-- 返回 500 Internal Server Error
-- 记录错误日志
-
-## 性能优化
-
-1. 缓存处理
-   - 缓存常用签名
-   - 避免重复计算
-
-2. 并发处理
-   - 线程安全的实现
-   - 最小化锁竞争
-
-## 注意事项
-
-1. 安全建议
-   - 使用安全的密钥
-   - 定期更新密钥
-   - 使用 HTTPS
-   - 定期清理过期的 nonce
-
-2. 配置建议
-   - 选择合适的算法
-   - 设置合理的字段
-   - 考虑性能影响
-   - 设置合适的时间戳有效期
-
-3. 运维建议
-   - 监控校验失败率
-   - 记录错误日志
-   - 及时处理异常 
+## 十、插件配置
+在路由或全局plugins中添加`consistency`插件即可。 

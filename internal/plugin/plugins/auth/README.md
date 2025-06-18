@@ -1,119 +1,100 @@
-# 认证插件 (Auth Plugin)
+# 认证插件（auth）
 
-认证插件提供了灵活的请求认证机制，支持多种认证方式。
+## 一、概述
+认证插件用于对进入网关的请求进行身份认证，支持Token（JWT）和Basic两种认证方式。可灵活配置认证类型、密钥、角色权限等，保障API安全。
 
-## 功能特点
+## 二、设计目标
+1. 支持多种认证方式（Token、Basic）
+2. 灵活配置认证参数
+3. 支持角色权限控制
+4. 支持跳过部分路径
+5. 完善的错误处理和日志记录
 
-- 🔐 支持多种认证方式
-  - Token 认证
-  - Basic 认证
-- ⚙️ 可配置的认证参数
-- 🔄 支持自定义认证逻辑扩展
+## 三、流程图
+1. 客户端发起请求
+2. 插件拦截请求
+3. 判断认证类型
+   - Token：校验JWT
+   - Basic：校验用户名密码
+4. 校验通过则放行，否则返回错误
+5. 后端服务处理请求
 
-## 配置说明
+## 四、配置参数
 
+| 名称              | 数据类型         | 必填 | 默认值         | 描述                         |
+|-------------------|----------------|------|----------------|------------------------------|
+| type              | string         | 否   | token          | 认证类型：token/basic         |
+| token_header      | string         | 否   | Authorization  | Token请求头名称              |
+| token_prefix      | string         | 否   | Bearer         | Token前缀                    |
+| secret_key        | string         | 否   | -              | JWT密钥                      |
+| token_expiry      | int            | 否   | 3600           | Token过期时间（秒）           |
+| issuer            | string         | 否   | gateway-go     | Token发行者                  |
+| audience          | string         | 否   | api-users      | Token受众                    |
+| algorithms        | array of string| 否   | ["HS256"]      | 支持的算法                   |
+| user_claim        | string         | 否   | sub            | 用户标识字段                 |
+| roles_claim       | string         | 否   | roles          | 角色字段                     |
+| required_roles    | array of string| 否   | []             | 必需角色列表                 |
+| skip_paths        | array of string| 否   | []             | 跳过认证的路径               |
+| users             | array of object| 否   | -              | Basic认证用户列表             |
+
+## 五、配置示例
+
+#### Token认证
 ```yaml
-plugins:
-  - name: auth
-    enabled: true
-    order: 1
-    config:
-      # 认证类型：token 或 basic
-      type: token
-      
-      # Token 认证配置
-      token_header: Authorization
-      token_prefix: Bearer
-      
-      # Basic 认证配置
-      realm: API Service
+- name: auth
+  enabled: true
+  order: 2
+  config:
+    type: token
+    token_header: Authorization
+    token_prefix: Bearer
+    secret_key: your-secret-key
+    token_expiry: 3600
+    required_roles: ["admin"]
+    skip_paths: ["/health"]
 ```
 
-## 认证方式
-
-### Token 认证
-
-1. 请求头格式：
-```
-Authorization: Bearer <token>
-```
-
-2. 配置参数：
-- `type`: 设置为 "token"
-- `token_header`: 指定请求头名称
-- `token_prefix`: 指定 token 前缀
-
-### Basic 认证
-
-1. 请求头格式：
-```
-Authorization: Basic <base64(username:password)>
-```
-
-2. 配置参数：
-- `type`: 设置为 "basic"
-- `realm`: 指定认证域
-
-## 使用示例
-
-1. 注册插件：
-```go
-authPlugin := auth.New()
-pluginManager.Register(authPlugin)
-```
-
-2. 配置插件：
+#### Basic认证
 ```yaml
-plugins:
-  - name: auth
-    enabled: true
-    order: 1
-    config:
-      type: token
-      token_header: Authorization
-      token_prefix: Bearer
+- name: auth
+  enabled: true
+  order: 2
+  config:
+    type: basic
+    users:
+      - username: admin
+        password: admin123
+        roles: ["admin"]
+      - username: user
+        password: user123
+        roles: ["user"]
 ```
 
-3. 发送认证请求：
+## 六、运行属性
+- 插件执行阶段：认证阶段
+- 插件执行优先级：2
+
+## 七、请求示例
 ```bash
-# Token 认证
-curl -H "Authorization: Bearer your-token" http://api.example.com
-
-# Basic 认证
-curl -u username:password http://api.example.com
+curl -H "Authorization: Bearer <token>" http://localhost:8080/api/users
+curl -u admin:admin123 http://localhost:8080/api/users
 ```
 
-## 扩展开发
+## 八、处理流程
+1. 校验配置参数
+2. 判断请求路径是否跳过
+3. 按type选择认证方式
+4. 校验Token或用户名密码
+5. 校验角色权限
+6. 认证通过则放行，否则返回错误
 
-1. 实现新的认证方式：
-```go
-type CustomAuth struct {
-    config map[string]interface{}
-}
+## 九、错误码
 
-func (a *CustomAuth) Handle(ctx *gin.Context) error {
-    // 实现自定义认证逻辑
-    return nil
-}
-```
+| HTTP 状态码 | 出错信息           | 说明                   |
+|-------------|--------------------|------------------------|
+| 400         | Invalid Signature  | JWT解析失败            |
+| 401         | Unauthorized       | 未提供认证信息/认证失败|
+| 403         | Forbidden          | 权限不足               |
 
-2. 注册自定义认证：
-```go
-customAuth := &CustomAuth{}
-pluginManager.Register(customAuth)
-```
-
-## 注意事项
-
-1. 安全性
-   - 使用 HTTPS 传输
-   - 定期轮换 token
-   - 设置合理的 token 过期时间
-
-2. 性能
-   - 使用缓存存储 token 验证结果
-   - 避免频繁的数据库查询
-
-3. 错误处理
-   - 返回适当的 HTTP 状态码
-   - 提供清晰的错误信息 
+## 十、插件配置
+在路由或全局plugins中添加`auth`插件即可。 
