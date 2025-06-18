@@ -730,23 +730,20 @@ curl http://localhost:8080/api/test
 | parameter_name    | string         | 是   | default_value  | 参数描述                     |
 
 ## 五、配置示例
-
-```yaml
 - name: plugin_name
   enabled: true
   order: 10
   config:
     parameter_name: "value"
-```
+
 
 ## 六、运行属性
 - 插件执行阶段：xxx阶段
 - 插件执行优先级：10
 
 ## 七、请求示例
-```bash
 curl http://localhost:8080/api/example
-```
+
 
 ## 八、处理流程
 1. 步骤1
