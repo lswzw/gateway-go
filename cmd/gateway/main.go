@@ -5,20 +5,23 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 
 	"gateway-go/internal/config"
 	"gateway-go/internal/logger"
 	"gateway-go/internal/plugin"
-	"gateway-go/internal/plugin/plugins/auth"
 	"gateway-go/internal/plugin/plugins/circuitbreaker"
 	"gateway-go/internal/plugin/plugins/consistency"
 	"gateway-go/internal/plugin/plugins/cors"
 	errorplugin "gateway-go/internal/plugin/plugins/error"
+	"gateway-go/internal/plugin/plugins/interface_auth"
 	"gateway-go/internal/plugin/plugins/ipwhitelist"
-	loggerplugin "gateway-go/internal/plugin/plugins/logger"
 	"gateway-go/internal/plugin/plugins/ratelimit"
 	"gateway-go/internal/router"
 
@@ -270,31 +273,40 @@ func startServer() error {
 
 // registerPlugins 注册所有插件
 func registerPlugins() {
-	// 注册认证插件
-	pluginManager.Register(auth.New())
-
 	// 注册限流插件
-	pluginManager.Register(ratelimit.New())
+	if err := pluginManager.Register(ratelimit.New()); err != nil {
+		log.Printf("注册限流插件失败: %v", err)
+	}
 
 	// 注册熔断器插件
-	pluginManager.Register(circuitbreaker.New())
+	if err := pluginManager.Register(circuitbreaker.New()); err != nil {
+		log.Printf("注册熔断器插件失败: %v", err)
+	}
 
 	// 注册跨域插件
-	pluginManager.Register(cors.New())
-
-	// 注册日志插件
-	pluginManager.Register(loggerplugin.New())
+	if err := pluginManager.Register(cors.New()); err != nil {
+		log.Printf("注册跨域插件失败: %v", err)
+	}
 
 	// 注册错误处理插件
-	errorPlugin := errorplugin.New()
-	errorPlugin.SetLogger(logger.Log)
-	pluginManager.Register(errorPlugin)
+	if err := pluginManager.Register(errorplugin.New()); err != nil {
+		log.Printf("注册错误处理插件失败: %v", err)
+	}
 
 	// 注册IP白名单插件
-	pluginManager.Register(ipwhitelist.New())
+	if err := pluginManager.Register(ipwhitelist.New()); err != nil {
+		log.Printf("注册IP白名单插件失败: %v", err)
+	}
 
 	// 注册一致性校验插件
-	pluginManager.Register(consistency.New())
+	if err := pluginManager.Register(consistency.New()); err != nil {
+		log.Printf("注册一致性校验插件失败: %v", err)
+	}
+
+	// 注册外部接口认证插件
+	if err := pluginManager.Register(interface_auth.New()); err != nil {
+		log.Printf("注册外部接口认证插件失败: %v", err)
+	}
 
 	fmt.Println("✓ 所有插件已注册")
 }
@@ -410,32 +422,41 @@ func registerRoutes(r *gin.Engine) {
 		return
 	}
 
-	registeredPaths := make(map[string]bool)
-	for _, route := range cfg.Routes {
-		registerRoute(r, route, registeredPaths)
-	}
-}
+	// 按优先级排序路由
+	routes := make([]config.RouteConfig, len(cfg.Routes))
+	copy(routes, cfg.Routes)
+	sort.Slice(routes, func(i, j int) bool {
+		return routes[i].Match.Priority > routes[j].Match.Priority
+	})
 
-// registerRoute 注册单个路由
-func registerRoute(r *gin.Engine, route config.RouteConfig, registeredPaths map[string]bool) {
-	// 检查路径是否已注册
-	if registeredPaths[route.Match.Path] {
-		fmt.Printf("警告: 路径 %s 已注册，跳过\n", route.Match.Path)
-		return
-	}
-	registeredPaths[route.Match.Path] = true
+	// 创建路由处理中间件
+	r.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		var matchedRoute *config.RouteConfig
 
-	// 创建路由处理器
-	handler := func(c *gin.Context) {
+		// 查找匹配的路由
+		for _, route := range routes {
+			if matchRoute(path, route.Match) {
+				matchedRoute = &route
+				break
+			}
+		}
+
+		// 如果没有匹配的路由，继续下一个处理器
+		if matchedRoute == nil {
+			c.Next()
+			return
+		}
+
 		// 设置目标信息到上下文
-		c.Set("target", route.Target.URL)
+		c.Set("target", matchedRoute.Target.URL)
 
 		// 执行插件链
-		if err := pluginManager.Execute(c, route.Name); err != nil {
-			// 如果插件执行失败，返回错误响应
+		if err := pluginManager.Execute(c, matchedRoute.Name); err != nil {
 			c.JSON(500, gin.H{
 				"error": err.Error(),
 			})
+			c.Abort()
 			return
 		}
 
@@ -444,21 +465,68 @@ func registerRoute(r *gin.Engine, route config.RouteConfig, registeredPaths map[
 			return
 		}
 
-		// 执行实际的请求转发逻辑
-		c.JSON(200, gin.H{
-			"message": fmt.Sprintf("路由 %s 处理中", route.Name),
-			"target":  route.Target.URL,
-			"path":    route.Match.Path,
+		// 创建反向代理
+		target, err := url.Parse(matchedRoute.Target.URL)
+		if err != nil {
+			c.JSON(500, gin.H{
+				"error": fmt.Sprintf("无效的目标URL: %v", err),
+			})
+			c.Abort()
+			return
+		}
+
+		// 处理路径前缀
+		proxyPath := path
+		if matchedRoute.Match.Type == "prefix" && matchedRoute.Match.Path != "/" {
+			proxyPath = strings.TrimPrefix(path, matchedRoute.Match.Path)
+			if !strings.HasPrefix(proxyPath, "/") {
+				proxyPath = "/" + proxyPath
+			}
+		}
+
+		// 创建反向代理
+		proxy := httputil.NewSingleHostReverseProxy(target)
+
+		// 设置自定义的 Director
+		originalDirector := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			originalDirector(req)
+			req.URL.Path = proxyPath
+			req.Header = c.Request.Header
+			req.Header.Set("X-Forwarded-Host", c.Request.Host)
+			req.Header.Set("X-Origin-Host", target.Host)
+		}
+
+		// 设置错误处理
+		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": fmt.Sprintf("代理请求失败: %v", err),
+			})
+		}
+
+		// 执行代理请求
+		proxy.ServeHTTP(c.Writer, c.Request)
+		c.Abort()
+	})
+
+	// 注册一个通配符路由来捕获所有请求
+	r.NoRoute(func(c *gin.Context) {
+		c.JSON(404, gin.H{
+			"error": "未找到匹配的路由",
 		})
+	})
+}
+
+// matchRoute 检查路径是否匹配路由规则
+func matchRoute(path string, match config.RouteMatch) bool {
+	switch match.Type {
+	case "exact":
+		return path == match.Path
+	case "prefix":
+		return strings.HasPrefix(path, match.Path)
+	default:
+		return path == match.Path
 	}
-
-	// 注册路由
-	r.Any(route.Match.Path, handler)
-
-	// 存储处理器引用
-	routeHandlers[route.Match.Path] = handler
-
-	fmt.Printf("注册路由: %s -> %s\n", route.Match.Path, route.Target.URL)
 }
 
 // writePIDFile 写入PID文件

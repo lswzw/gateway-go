@@ -18,7 +18,6 @@ type ErrorPlugin struct {
 	config   map[string]interface{}
 	logger   *zap.Logger
 	notifier *errors.ErrorNotifier
-	fallback *errors.FallbackHandler
 	retry    errors.RetryConfig
 }
 
@@ -42,11 +41,7 @@ func (p *ErrorPlugin) Init(config interface{}) error {
 	// 创建错误通知器
 	notifier := errors.NewErrorNotifier(errors.DefaultNotificationConfig)
 
-	// 创建降级处理器
-	fallback := errors.NewFallbackHandler(errors.DefaultFallbackConfig)
-
 	p.notifier = notifier
-	p.fallback = fallback
 	p.retry = errors.DefaultRetryConfig
 
 	return nil
@@ -86,9 +81,6 @@ func (p *ErrorPlugin) handleError(ctx *gin.Context, err error) {
 		defer cancel()
 		p.notifier.Notify(notifyCtx, e)
 
-		// 记录错误用于降级判断
-		p.fallback.RecordError(e)
-
 		// 返回错误响应
 		ctx.JSON(e.HTTPStatus(), e)
 		return
@@ -107,9 +99,6 @@ func (p *ErrorPlugin) handleError(ctx *gin.Context, err error) {
 	defer cancel()
 	p.notifier.Notify(notifyCtx, err)
 
-	// 记录错误用于降级判断
-	p.fallback.RecordError(err)
-
 	// 返回通用错误响应
 	ctx.JSON(http.StatusInternalServerError, errors.New(errors.ErrInternalServerError, "服务器内部错误"))
 }
@@ -127,11 +116,6 @@ func (p *ErrorPlugin) AddNotificationChannel(channel errors.NotificationChannel)
 // SetRetryConfig 设置重试配置
 func (p *ErrorPlugin) SetRetryConfig(config errors.RetryConfig) {
 	p.retry = config
-}
-
-// SetFallbackConfig 设置降级配置
-func (p *ErrorPlugin) SetFallbackConfig(config errors.FallbackConfig) {
-	p.fallback.SetConfig(config)
 }
 
 // SetNotificationConfig 设置通知配置

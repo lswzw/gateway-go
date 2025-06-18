@@ -8,8 +8,7 @@
 - 🔧 **动态配置**：支持配置文件热重载，无需重启服务
 - 🛣️ **灵活路由**：支持多种路由匹配模式（精确、前缀、正则、通配符）
 - 🔌 **插件化架构**：支持插件化扩展，精准控制每个路由的插件
-- 🔒 **安全认证**：内置认证、限流、熔断等安全插件
-- 📊 **监控完善**：集成日志、错误处理等监控插件
+- 🔒 **安全防护**：内置限流、熔断等安全插件
 - 🔄 **高可用**：支持熔断、重试、降级等容错机制
 
 ## 📚 文档
@@ -54,17 +53,16 @@ server:
 # 插件配置
 plugins:
   available:
-    - name: auth
+    - name: rate_limit
       enabled: true
       order: 1
       config:
-        type: token
-        token_header: Authorization
-    - name: rate_limit
+        requests_per_second: 100
+    - name: circuit_breaker
       enabled: true
       order: 2
       config:
-        requests_per_second: 100
+        failure_threshold: 5
 
 # 路由配置
 routes:
@@ -74,7 +72,7 @@ routes:
       path: /api
     target:
       url: http://localhost:8081
-    plugins: ["auth", "rate_limit"]  # 指定该路由使用的插件
+    plugins: ["rate_limit", "circuit_breaker"]  # 指定该路由使用的插件
 ```
 
 ### 运行服务
@@ -91,11 +89,9 @@ go run cmd/gateway/main.go
 
 ### 可用插件
 
-- **认证插件 (auth)**：支持 Token 和 Basic 认证
 - **限流插件 (rate_limit)**：支持基于 IP 和用户的限流
 - **熔断器插件 (circuit_breaker)**：保护后端服务
 - **跨域插件 (cors)**：处理跨域请求
-- **日志插件 (logger)**：请求日志记录
 - **错误处理插件 (error)**：统一错误处理
 - **IP白名单插件 (ip_whitelist)**：IP访问控制
 - **一致性校验插件 (consistency)**：请求签名验证
@@ -124,12 +120,6 @@ go run cmd/gateway/main.go
 
 ```bash
 curl http://localhost:8080/health
-```
-
-### API 请求（需要认证）
-
-```bash
-curl -H "Authorization: Bearer your-token" http://localhost:8080/api/users
 ```
 
 ### 配置管理

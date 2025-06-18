@@ -20,6 +20,7 @@ dist/
 go.work
 
 # IDE and editor files
+.cursor/
 .vscode/
 .idea/
 *.swp

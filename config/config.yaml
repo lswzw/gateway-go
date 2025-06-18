@@ -36,36 +36,10 @@ plugins:
   # 插件要生效必须在路由的 plugins 字段中明确指定
   # order: 插件执行顺序，数字越小优先级越高
   available:
-    # 日志插件 - 记录请求和响应日志
-    - name: logger
-      enabled: true
-      order: 1
-      config:
-        level: info              # 日志级别：debug, info, warn, error
-        sample_rate: 1.0         # 采样率：0.0-1.0，1.0表示记录所有请求
-        log_headers: true        # 是否记录请求头
-        log_query: true          # 是否记录查询参数
-        log_body: false          # 是否记录请求体（注意：可能包含敏感信息）
-        buffer_size: 1000        # 日志缓冲区大小
-        flush_interval: 5        # 刷新间隔，单位：秒
-        skip_paths: ["/health"]  # 跳过记录的路径列表
-
-    # 认证插件 - 验证请求的合法性
-    - name: auth
-      enabled: true
-      order: 2
-      config:
-        type: token              # 认证类型：token, basic, oauth2, jwt
-        token_header: Authorization  # 认证头字段名
-        token_prefix: Bearer     # 认证头前缀
-        # secret_key: your-secret-key  # JWT密钥（当type为jwt时使用）
-        # issuer: your-issuer          # JWT发行者（当type为jwt时使用）
-        # audience: your-audience      # JWT受众（当type为jwt时使用）
-
     # 限流插件 - 控制请求频率
     - name: rate_limit
       enabled: true
-      order: 3
+      order: 1
       config:
         requests_per_second: 100 # 每秒允许的请求数
         burst: 200               # 突发请求数（令牌桶大小）
@@ -76,7 +50,7 @@ plugins:
     # 熔断器插件 - 保护后端服务
     - name: circuit_breaker
       enabled: true
-      order: 4
+      order: 2
       config:
         # 熔断器配置
         failure_threshold: 5     # 失败阈值，连续失败次数达到此值时触发熔断
@@ -88,7 +62,7 @@ plugins:
     # 跨域插件 - 处理跨域请求
     - name: cors
       enabled: true
-      order: 5
+      order: 3
       config:
         allowed_origins: ["*"]   # 允许的源，*表示允许所有源
         allowed_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]  # 允许的HTTP方法
@@ -130,6 +104,19 @@ plugins:
         signature_field: X-Signature  # 签名字段名
         timestamp_validity: 300  # 时间戳有效期，单位：秒
         # tolerance: 5           # 时间戳容差，单位：秒
+
+    # 外部接口认证插件 - 支持白名单/黑名单和外部认证服务
+    - name: interface_auth
+      enabled: true
+      order: 900
+      config:
+        consumers:
+          auth_api: "/auth/realms/paas/protocol/openid-connect/unauthorized"
+          host: "127.0.0.1:1234"
+        white_interfaces:
+          - "/info"
+          - "/health"
+          - "/verification/*"
 
 # =============================================================================
 # 路由配置部分
@@ -247,7 +234,8 @@ routes:
       url: http://192.168.100.69:80  # 目标服务地址
       timeout: 30000            # 请求超时时间
       retries: 3                # 重试次数
-    plugins: ["auth", "rate_limit", "circuit_breaker"]  # 该路由使用的插件列表
+    plugins: ["interface_auth"]  # 该路由使用的插件列表
+    strip_prefix: true          # 移除 /api 前缀
 
   # 多租户支持 - 基于主机名的路由
   - name: tenant1-service
@@ -258,7 +246,7 @@ routes:
       priority: 90
     target:
       url: http://tenant1-service:8080
-    plugins: ["auth", "rate_limit"]
+    plugins: ["rate_limit"]
 
   # 版本管理 - 基于主机名的API版本控制
   - name: v1-api
@@ -279,3 +267,27 @@ routes:
       priority: 85
     target:
       url: http://us-api-service:8080
+
+  # 测试认证路由
+  - name: auth-test
+    match:
+      type: prefix
+      path: /api/test
+      priority: 90
+    target:
+      url: http://127.0.0.1:8080
+      timeout: 30000
+      retries: 3
+    plugins: ["interface_auth"]
+
+  # 黑名单测试路由
+  - name: auth-blacklist-test
+    match:
+      type: prefix
+      path: /auth/test
+      priority: 95
+    target:
+      url: http://127.0.0.1:8080
+      timeout: 30000
+      retries: 3
+    plugins: ["interface_auth"]
