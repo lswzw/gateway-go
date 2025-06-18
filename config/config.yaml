@@ -1,0 +1,281 @@
+# =============================================================================
+# Gateway Go 配置文件
+# =============================================================================
+# 本配置文件定义了网关服务器的所有配置项，包括服务器设置、日志配置、
+# 插件管理和路由规则。所有配置项都有详细的注释说明。
+
+# =============================================================================
+# 服务器配置部分
+# =============================================================================
+server:
+  port: 8080                    # 服务器监听端口号，范围：1-65535
+  mode: debug                   # 运行模式：debug（调试模式，详细日志）或 release（生产模式，精简日志）
+  read_timeout: "60s"           # 读取请求的超时时间，支持单位：ns, us, ms, s, m, h
+  write_timeout: "60s"          # 写入响应的超时时间，支持单位：ns, us, ms, s, m, h
+  max_header_bytes: 1048576     # 请求头的最大字节数，1MB = 1024*1024
+  graceful_shutdown_timeout: "30s"  # 优雅关闭的超时时间，等待现有连接完成
+
+# =============================================================================
+# 日志配置部分（基础设置，全局生效）
+# =============================================================================
+log:
+  level: info                   # 日志级别：debug, info, warn, error（从左到右级别递增）
+  format: json                  # 日志格式：json（结构化）或 text（可读性更好）
+  output: stdout                # 日志输出位置：stdout（标准输出）或文件路径（如：/var/log/gateway.log）
+  max_size: 100                 # 单个日志文件最大大小，单位：MB，超过后自动轮转
+  max_age: 30                   # 日志文件保留天数，超过后自动删除
+  max_backups: 10               # 保留的日志文件备份数量，超过后删除最旧的
+  compress: true                # 是否压缩旧的日志文件，节省磁盘空间
+
+# =============================================================================
+# 插件配置部分
+# =============================================================================
+plugins:
+  # 全局插件定义（仅定义插件是否可用，不自动生效）
+  # enabled: true 表示插件可用，但不会自动对所有路由生效
+  # 插件要生效必须在路由的 plugins 字段中明确指定
+  # order: 插件执行顺序，数字越小优先级越高
+  available:
+    # 日志插件 - 记录请求和响应日志
+    - name: logger
+      enabled: true
+      order: 1
+      config:
+        level: info              # 日志级别：debug, info, warn, error
+        sample_rate: 1.0         # 采样率：0.0-1.0，1.0表示记录所有请求
+        log_headers: true        # 是否记录请求头
+        log_query: true          # 是否记录查询参数
+        log_body: false          # 是否记录请求体（注意：可能包含敏感信息）
+        buffer_size: 1000        # 日志缓冲区大小
+        flush_interval: 5        # 刷新间隔，单位：秒
+        skip_paths: ["/health"]  # 跳过记录的路径列表
+
+    # 认证插件 - 验证请求的合法性
+    - name: auth
+      enabled: true
+      order: 2
+      config:
+        type: token              # 认证类型：token, basic, oauth2, jwt
+        token_header: Authorization  # 认证头字段名
+        token_prefix: Bearer     # 认证头前缀
+        # secret_key: your-secret-key  # JWT密钥（当type为jwt时使用）
+        # issuer: your-issuer          # JWT发行者（当type为jwt时使用）
+        # audience: your-audience      # JWT受众（当type为jwt时使用）
+
+    # 限流插件 - 控制请求频率
+    - name: rate_limit
+      enabled: true
+      order: 3
+      config:
+        requests_per_second: 100 # 每秒允许的请求数
+        burst: 200               # 突发请求数（令牌桶大小）
+        dimension: ip            # 限流维度：ip（按IP限流）, user（按用户限流）, global（全局限流）
+        # window_size: 60        # 时间窗口大小，单位：秒
+        # strategy: token_bucket # 限流策略：token_bucket, leaky_bucket, sliding_window
+
+    # 熔断器插件 - 保护后端服务
+    - name: circuit_breaker
+      enabled: true
+      order: 4
+      config:
+        # 熔断器配置
+        failure_threshold: 5     # 失败阈值，连续失败次数达到此值时触发熔断
+        success_threshold: 2     # 成功阈值，连续成功次数达到此值时恢复
+        timeout: 60              # 熔断时间，单位：秒
+        # half_open_requests: 1  # 半开状态允许的请求数
+        # error_percentage: 50   # 错误百分比阈值
+
+    # 跨域插件 - 处理跨域请求
+    - name: cors
+      enabled: true
+      order: 5
+      config:
+        allowed_origins: ["*"]   # 允许的源，*表示允许所有源
+        allowed_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]  # 允许的HTTP方法
+        allowed_headers: ["*"]   # 允许的请求头，*表示允许所有头
+        exposed_headers: ["Content-Length"]  # 暴露给客户端的响应头
+        max_age: "12h"           # 预检请求的缓存时间
+        allow_credentials: true  # 是否允许携带认证信息
+
+    # 错误处理插件 - 统一错误响应格式
+    - name: error
+      enabled: true
+      order: 100                 # 通常放在最后执行
+      config:
+        # 错误处理配置
+        include_stack_trace: false  # 是否在响应中包含堆栈信息（生产环境建议false）
+        log_errors: true         # 是否记录错误日志
+        # custom_error_messages:   # 自定义错误消息映射
+        #   404: "资源未找到"
+        #   500: "服务器内部错误"
+
+    # IP白名单插件 - 基于IP地址的访问控制
+    - name: ip_whitelist
+      enabled: false
+      order: 10
+      config:
+        ip_whitelist: []         # IP白名单列表，支持CIDR格式
+        # 示例：["192.168.1.0/24", "10.0.0.1", "172.16.0.0/16"]
+        # action: allow          # 动作：allow（白名单模式）, deny（黑名单模式）
+        # fallback_action: deny  # 默认动作：当IP不在列表中时的处理方式
+
+    # 一致性校验插件 - 验证请求的完整性
+    - name: consistency
+      enabled: false
+      order: 20
+      config:
+        algorithm: hmac-sha256   # 签名算法：hmac-sha256, hmac-sha1, md5
+        secret: your-secret-key  # 签名密钥
+        fields: [timestamp, nonce]  # 参与签名的字段
+        signature_field: X-Signature  # 签名字段名
+        timestamp_validity: 300  # 时间戳有效期，单位：秒
+        # tolerance: 5           # 时间戳容差，单位：秒
+
+# =============================================================================
+# 路由配置部分
+# =============================================================================
+routes:
+  # 健康检查路由 - 用于监控系统状态
+  - name: health-check          # 路由名称，用于标识和日志记录
+    match:                      # 路由匹配规则
+      type: exact               # 匹配类型：exact（精确匹配）, prefix（前缀匹配）, regex（正则匹配）
+      path: /health             # 匹配路径
+      priority: 100             # 路由优先级，数字越大优先级越高，范围：0-1000
+      # host: "example.com"     # 主机名匹配（可选）
+      # method: ["GET"]         # HTTP方法匹配（可选）
+    target:                     # 目标服务配置
+      url: http://127.0.0.1:8080  # 目标服务地址
+      timeout: 30000            # 请求超时时间，单位：毫秒
+      retries: 3                # 重试次数
+      # retry_delay: 1000       # 重试延迟，单位：毫秒
+      # health_check:           # 健康检查配置（可选）
+      #   path: /health
+      #   interval: 30s
+      #   timeout: 5s
+    plugins: []                 # 该路由使用的插件列表（空表示不使用插件）
+    # 高级配置（可选）
+    # strip_prefix: false       # 是否移除路径前缀
+    # preserve_host: false      # 是否保留原始Host头
+    # headers:                  # 自定义请求头（可选）
+    #   X-Custom-Header: "value"
+
+  # =============================================================================
+  # 完整配置示例（已注释，供参考）
+  # =============================================================================
+  # - name: complete-example
+  #   match:
+  #     type: prefix
+  #     path: /api/v1
+  #     host: "api.example.com"
+  #     method: ["GET", "POST", "PUT", "DELETE"]
+  #     priority: 95
+  #     # 高级匹配条件
+  #     headers:                 # 请求头匹配（可选）
+  #       X-API-Version: "v1"
+  #       Content-Type: "application/json"
+  #     query_params:           # 查询参数匹配（可选）
+  #       version: "v1"
+  #     # 自定义匹配器（可选）
+  #     custom_matcher:
+  #       type: "script"
+  #       script: "return request.headers['X-Custom'] === 'value'"
+  #   target:
+  #     url: http://backend-service:8080
+  #     timeout: 30000
+  #     retries: 3
+  #     retry_delay: 1000
+  #     # 负载均衡配置（可选）
+  #     load_balancer:
+  #       type: "round_robin"   # 负载均衡策略：round_robin, least_connections, ip_hash
+  #       servers:
+  #         - http://backend1:8080
+  #         - http://backend2:8080
+  #         - http://backend3:8080
+  #     # 健康检查配置
+  #     health_check:
+  #       path: /health
+  #       interval: 30s
+  #       timeout: 5s
+  #       healthy_threshold: 2
+  #       unhealthy_threshold: 3
+  #     # 连接池配置
+  #     connection_pool:
+  #       max_connections: 100
+  #       max_idle_connections: 10
+  #       idle_timeout: 90s
+  #   plugins: ["auth", "rate_limit", "circuit_breaker", "logger"]
+  #   # 高级配置
+  #   strip_prefix: true        # 移除 /api/v1 前缀
+  #   preserve_host: true       # 保留原始Host头
+  #   headers:                  # 添加自定义请求头
+  #     X-Route-Name: "complete-example"
+  #     X-Forwarded-For: "${client_ip}"
+  #   # 响应处理（可选）
+  #   response:
+  #     headers:                # 添加响应头
+  #       X-Response-Time: "${response_time}"
+  #       X-Server: "gateway-go"
+  #     # 响应转换（可选）
+  #     transform:
+  #       type: "json"
+  #       template: |
+  #         {
+  #           "status": "success",
+  #           "data": {{.response_body}},
+  #           "timestamp": "{{.timestamp}}"
+  #         }
+
+  # 默认服务路由 - 处理其他所有请求
+  - name: default-service
+    match:
+      type: exact               # 匹配类型：exact（精确匹配）
+      path: /                   # 匹配根路径
+      priority: 0               # 路由优先级（最低）
+    target:
+      url: http://127.0.0.1:8888  # 目标服务地址
+      timeout: 30000            # 请求超时时间
+      retries: 3                # 重试次数
+    plugins: []                 # 该路由使用的插件列表（空表示不使用插件）
+
+  # API服务路由 - 处理API请求
+  - name: api-service
+    match:
+      type: prefix              # 匹配类型：prefix（前缀匹配）
+      path: /api                # 匹配路径前缀
+      priority: 90              # 路由优先级
+    target:
+      url: http://192.168.100.69:80  # 目标服务地址
+      timeout: 30000            # 请求超时时间
+      retries: 3                # 重试次数
+    plugins: ["auth", "rate_limit", "circuit_breaker"]  # 该路由使用的插件列表
+
+  # 多租户支持 - 基于主机名的路由
+  - name: tenant1-service
+    match:
+      type: prefix
+      path: /api
+      host: "*.tenant1.example.com"  # 支持通配符
+      priority: 90
+    target:
+      url: http://tenant1-service:8080
+    plugins: ["auth", "rate_limit"]
+
+  # 版本管理 - 基于主机名的API版本控制
+  - name: v1-api
+    match:
+      type: prefix
+      path: /api
+      host: "v1.api.example.com"
+      priority: 80
+    target:
+      url: http://v1-api-service:8080
+
+  # 地域路由 - 基于地理位置的请求路由
+  - name: us-api
+    match:
+      type: prefix
+      path: /api
+      host: "us-api.example.com"
+      priority: 85
+    target:
+      url: http://us-api-service:8080
