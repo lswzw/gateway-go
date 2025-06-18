@@ -36,7 +36,7 @@ Gateway-Go 提供了完整的 RESTful API 接口，用于配置管理、监控�
 
 **请求**
 ```
-GET /health
+GET /gatewaygo/health
 ```
 
 **响应**
@@ -54,7 +54,7 @@ GET /health
 
 **请求**
 ```
-GET /admin/config
+GET /gatewaygo/admin/config/current
 ```
 
 **响应**
@@ -77,7 +77,7 @@ GET /admin/config
 
 **请求**
 ```
-POST /admin/config/update
+POST /gatewaygo/admin/config/update
 ```
 
 **请求参数**
@@ -97,7 +97,7 @@ POST /admin/config/update
 
 **请求**
 ```
-PATCH /admin/config/update
+PATCH /gatewaygo/admin/config/update
 ```
 
 **请求参数**
@@ -119,7 +119,7 @@ PATCH /admin/config/update
 
 **请求**
 ```
-POST /admin/config/rollback/{version}
+POST /gatewaygo/admin/config/rollback/{version}
 ```
 
 **路径参数**
@@ -137,32 +137,7 @@ POST /admin/config/rollback/{version}
 ### 1. 健康检查
 
 ```bash
-curl "http://localhost:8080/health"
-```
-
-### 2. 更新路由配置
-
-```bash
-curl -X POST "http://localhost:8080/admin/config/update?comment=添加用户服务路由" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <admin-token>" \
-  -d '{
-    "routes": [
-      {
-        "name": "user-service",
-        "match": {
-          "type": "prefix",
-          "path": "/api/users"
-        },
-        "target": {
-          "url": "http://user-service:8080",
-          "timeout": 30000,
-          "retries": 3
-        },
-        "plugins": ["auth", "rate_limit"]
-      }
-    ]
-  }'
+curl "http://localhost:8080/gatewaygo/health"
 ```
 
 ## 注意事项
@@ -187,16 +162,6 @@ curl -X POST "http://localhost:8080/admin/config/update?comment=添加用户服�
 | 500 | Internal Server Error | 服务器内部错误 |
 | 502 | Bad Gateway | 网关错误 |
 | 503 | Service Unavailable | 服务暂时不可用 |
-
-## 认证和授权
-
-### Token 认证
-
-对于需要认证的 API，请在请求头中包含有效的认证令牌：
-
-```
-Authorization: Bearer <your-token>
-```
 
 ### 权限控制
 
@@ -225,7 +190,7 @@ API 接口受到限流控制：
 ### 1. 更新限流配置
 
 ```bash
-curl -X PATCH "http://localhost:8080/admin/config/update?comment=调整限流配置" \
+curl -X PATCH "http://localhost:8080/gatewaygo/admin/config/update?comment=调整限流配置" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <admin-token>" \
   -d '{
@@ -241,7 +206,7 @@ curl -X PATCH "http://localhost:8080/admin/config/update?comment=调整限流配
 ### 2. 添加新路由
 
 ```bash
-curl -X POST "http://localhost:8080/admin/config/update?comment=添加用户服务路由" \
+curl -X POST "http://localhost:8080/gatewaygo/admin/config/update?comment=添加用户服务路由" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <admin-token>" \
   -d '{

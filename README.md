@@ -89,12 +89,13 @@ go run cmd/gateway/main.go
 
 ### 可用插件
 
-- **限流插件 (rate_limit)**：支持基于 IP 和用户的限流
-- **熔断器插件 (circuit_breaker)**：保护后端服务
+- **接口认证插件 (interface_auth)**：支持白名单和外部认证服务
+- **错误处理插件 (error)**：统一错误响应格式
 - **跨域插件 (cors)**：处理跨域请求
-- **错误处理插件 (error)**：统一错误处理
-- **IP白名单插件 (ip_whitelist)**：IP访问控制
-- **一致性校验插件 (consistency)**：请求签名验证
+- **熔断器插件 (circuitbreaker)**：保护后端服务
+- **IP白名单插件 (ipwhitelist)**：基于IP地址的访问控制
+- **一致性校验插件 (consistency)**：验证请求的完整性
+- **限流插件 (ratelimit)**：控制请求频率
 
 ### 插件配置特点
 
@@ -119,27 +120,38 @@ go run cmd/gateway/main.go
 ### 健康检查
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8080/gatewaygo/health
 ```
 
 ### 配置管理
 
+网关支持通过命令行参数进行配置管理：
+
 ```bash
-# 获取当前配置
-curl http://localhost:8080/admin/config/current
-
 # 重新加载配置
-curl -X POST http://localhost:8080/admin/config/reload
+./gateway-go -s reload
 
-# 测试配置
-curl -X POST http://localhost:8080/admin/config/test
+# 优雅停止服务
+./gateway-go -s stop
+
+# 立即退出服务
+./gateway-go -s quit
+
+# 测试配置文件语法
+./gateway-go -t
+
+# 显示帮助信息
+./gateway-go -h
+
+# 显示版本信息
+./gateway-go -v
 ```
 
 ## 注意事项
 
 1. 确保配置文件格式正确，否则可能导致配置加载失败
 2. 插件配置需要先在 `available` 中定义，才能在路由中使用
-3. 修改配置文件后，服务会自动重新加载，无需重启
+3. 修改配置文件后，需要执行 `./gateway-go -s reload` 重新加载配置
 4. 如果配置加载失败，会在日志中显示错误信息，但不会影响现有路由的运行
 
 ## 错误处理

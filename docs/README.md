@@ -35,33 +35,9 @@
 - **[安全配置](best-practices/security.md)** - 安全配置建议
 - **[监控告警](best-practices/monitoring.md)** - 监控和告警配置
 
-## 🎯 按使用场景分类
-
-### 新手入门
-1. [快速开始指南](quickstart.md)
-2. [安装部署](deployment.md)
-3. [配置管理](configuration.md)
-
-### 开发者
-1. [开发环境搭建](development/setup.md)
-2. [插件开发指南](plugins/development.md)
-3. [代码规范](development/standards.md)
-4. [测试指南](development/testing.md)
-
-### 运维人员
-1. [生产环境部署](best-practices/production.md)
-2. [监控告警](best-practices/monitoring.md)
-3. [性能优化](best-practices/performance.md)
-4. [安全配置](best-practices/security.md)
-
-### 架构师
-1. [架构设计](architecture.md)
-2. [路由系统](routing.md)
-3. [插件系统](plugins/reference.md)
-
 ## 📝 文档更新
 
-- **最后更新**: 2024年12月
+- **最后更新**: 2025年06月
 - **版本**: v1.0.0
 - **维护者**: Gateway-Go 团队
 
@@ -71,5 +47,5 @@
 
 ## 📞 支持
 
-- **GitHub Issues**: [提交问题](https://github.com/your-org/gateway-go/issues)
-- **文档反馈**: [文档改进建议](https://github.com/your-org/gateway-go/issues/new?template=documentation.md) 
+- **GitHub Issues**: [提交问题](https://github.com/lswzw/gateway-go/issues)
+- **文档反馈**: [文档改进建议](https://github.com/lswzw/gateway-go/issues/new?template=documentation.md) 

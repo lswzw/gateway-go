@@ -382,37 +382,10 @@ func reloadRoutes() {
 
 // registerConfigRoutes 注册配置管理路由
 func registerConfigRoutes(r *gin.Engine) {
-	// 配置管理路由组
-	configGroup := r.Group("/admin/config")
-	{
-		// 获取当前配置
-		configGroup.GET("/current", func(c *gin.Context) {
-			cfg := configManager.GetConfig()
-			if cfg == nil {
-				c.JSON(404, gin.H{"error": "配置未找到"})
-				return
-			}
-			c.JSON(200, cfg)
-		})
-
-		// 重新加载配置
-		configGroup.POST("/reload", func(c *gin.Context) {
-			if err := configManager.ReloadConfig(); err != nil {
-				c.JSON(500, gin.H{"error": err.Error()})
-				return
-			}
-			c.JSON(200, gin.H{"message": "配置重载成功"})
-		})
-
-		// 测试配置
-		configGroup.POST("/test", func(c *gin.Context) {
-			if err := configManager.TestConfig(""); err != nil {
-				c.JSON(400, gin.H{"error": err.Error()})
-				return
-			}
-			c.JSON(200, gin.H{"message": "配置测试通过"})
-		})
-	}
+	// 健康检查路由
+	r.GET("/gatewaygo/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok"})
+	})
 }
 
 // registerRoutes 注册业务路由
@@ -462,6 +435,27 @@ func registerRoutes(r *gin.Engine) {
 
 		// 如果请求被中止，直接返回
 		if c.IsAborted() {
+			return
+		}
+
+		// 检查是否为内部响应配置
+		if strings.HasPrefix(matchedRoute.Target.URL, "internal://") {
+			// 处理内部响应
+			if matchedRoute.Response != nil {
+				// 设置内容类型
+				if matchedRoute.Response.ContentType != "" {
+					c.Header("Content-Type", matchedRoute.Response.ContentType)
+				} else {
+					c.Header("Content-Type", "text/plain")
+				}
+
+				// 返回自定义响应
+				c.String(matchedRoute.Response.Status, matchedRoute.Response.Content)
+			} else {
+				// 默认响应
+				c.String(200, "gateway-go running")
+			}
+			c.Abort()
 			return
 		}
 

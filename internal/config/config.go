@@ -64,10 +64,18 @@ type RouteMatch struct {
 
 // RouteConfig 路由配置
 type RouteConfig struct {
-	Name    string       `yaml:"name" mapstructure:"name"`
-	Match   RouteMatch   `yaml:"match" mapstructure:"match"`
-	Target  TargetConfig `yaml:"target" mapstructure:"target"`
-	Plugins []string     `yaml:"plugins" mapstructure:"plugins"`
+	Name     string          `yaml:"name" mapstructure:"name"`
+	Match    RouteMatch      `yaml:"match" mapstructure:"match"`
+	Target   TargetConfig    `yaml:"target" mapstructure:"target"`
+	Plugins  []string        `yaml:"plugins" mapstructure:"plugins"`
+	Response *ResponseConfig `yaml:"response" mapstructure:"response"`
+}
+
+// ResponseConfig 响应配置
+type ResponseConfig struct {
+	Status      int    `yaml:"status" mapstructure:"status"`
+	Content     string `yaml:"content" mapstructure:"content"`
+	ContentType string `yaml:"content_type" mapstructure:"content_type"`
 }
 
 // TargetConfig 目标服务配置

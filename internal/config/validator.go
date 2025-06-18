@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // ValidateConfig 验证配置
@@ -171,8 +172,12 @@ func validateRouteConfig(config *RouteConfig) error {
 		return fmt.Errorf("路由目标URL不能为空")
 	}
 
-	if _, err := url.Parse(config.Target.URL); err != nil {
-		return fmt.Errorf("无效的目标URL: %s", config.Target.URL)
+	// 检查是否为内部URL
+	if !strings.HasPrefix(config.Target.URL, "internal://") {
+		// 对于非内部URL，验证URL格式
+		if _, err := url.Parse(config.Target.URL); err != nil {
+			return fmt.Errorf("无效的目标URL: %s", config.Target.URL)
+		}
 	}
 
 	return nil

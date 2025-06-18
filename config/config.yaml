@@ -126,7 +126,7 @@ routes:
   - name: health-check          # 路由名称，用于标识和日志记录
     match:                      # 路由匹配规则
       type: exact               # 匹配类型：exact（精确匹配）, prefix（前缀匹配）, regex（正则匹配）
-      path: /health             # 匹配路径
+      path: /gatewaygo/health             # 匹配路径
       priority: 100             # 路由优先级，数字越大优先级越高，范围：0-1000
       # host: "example.com"     # 主机名匹配（可选）
       # method: ["GET"]         # HTTP方法匹配（可选）
@@ -219,10 +219,15 @@ routes:
       path: /                   # 匹配根路径
       priority: 0               # 路由优先级（最低）
     target:
-      url: http://127.0.0.1:8888  # 目标服务地址
+      url: internal://default   # 内部处理标识
       timeout: 30000            # 请求超时时间
       retries: 3                # 重试次数
     plugins: []                 # 该路由使用的插件列表（空表示不使用插件）
+    # 自定义响应配置
+    response:
+      status: 200               # 响应状态码
+      content: "gateway-go is running"  # 响应内容
+      content_type: "text/plain"     # 内容类型
 
   # API服务路由 - 处理API请求
   - name: api-service
@@ -267,27 +272,3 @@ routes:
       priority: 85
     target:
       url: http://us-api-service:8080
-
-  # 测试认证路由
-  - name: auth-test
-    match:
-      type: prefix
-      path: /api/test
-      priority: 90
-    target:
-      url: http://127.0.0.1:8080
-      timeout: 30000
-      retries: 3
-    plugins: ["interface_auth"]
-
-  # 黑名单测试路由
-  - name: auth-blacklist-test
-    match:
-      type: prefix
-      path: /auth/test
-      priority: 95
-    target:
-      url: http://127.0.0.1:8080
-      timeout: 30000
-      retries: 3
-    plugins: ["interface_auth"]

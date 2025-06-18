@@ -19,15 +19,15 @@ routes:
   - name: health-check
     match:
       type: exact
-      path: /health
+      path: /gatewaygo/health
     target:
       url: http://health-service:8080
 ```
 
 **匹配示例**：
-- 请求路径：`/health` ✅ 匹配
-- 请求路径：`/health/` ❌ 不匹配
-- 请求路径：`/health/status` ❌ 不匹配
+- 请求路径：`/gatewaygo/health` ✅ 匹配
+- 请求路径：`/gatewaygo/health/` ❌ 不匹配
+- 请求路径：`/gatewaygo/health/status` ❌ 不匹配
 
 #### 2. 前缀匹配 (prefix)
 
