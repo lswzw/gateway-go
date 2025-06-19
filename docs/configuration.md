@@ -12,7 +12,6 @@ Gateway-Go 采用 YAML 格式的配置文件，支持热重载和动态配置更
 # 服务器配置
 server:
   port: 8080
-  mode: debug  # debug, release
   read_timeout: "60s"
   write_timeout: "60s"
   max_header_bytes: 1048576
@@ -166,10 +165,11 @@ routes:
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | port | int | 8080 | 服务器监听端口 |
-| mode | string | debug | 运行模式 (debug/release) |
 | read_timeout | string | 60s | 读取超时时间 |
 | write_timeout | string | 60s | 写入超时时间 |
 | max_header_bytes | int | 1048576 | 最大请求头大小 |
+
+> 日志相关请统一通过 log 配置项管理，调试与生产日志级别请设置 log.level。
 
 ### 日志配置 (log)
 

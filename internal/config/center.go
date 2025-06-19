@@ -182,9 +182,9 @@ func (cc *ConfigCenter) UpdateConfig(newConfig *Config, comment string) error {
 	// 	mergedConfig.Server.Port = newConfig.Server.Port
 	// 	fmt.Printf("[DEBUG] 更新端口为: %d\n", newConfig.Server.Port)
 	// }
-	if newConfig.Server.Mode != "" {
-		mergedConfig.Server.Mode = newConfig.Server.Mode
-	}
+	// if newConfig.Server.Mode != "" {
+	//  mergedConfig.Server.Mode = newConfig.Server.Mode
+	// }
 	// 不更新超时配置，因为需要重启服务
 	// if newConfig.Server.ReadTimeout > 0 {
 	// 	mergedConfig.Server.ReadTimeout = newConfig.Server.ReadTimeout

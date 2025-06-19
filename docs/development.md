@@ -335,16 +335,9 @@ go tool cover -html=coverage.out -o coverage.html
 
 ## 调试指南
 
-### 1. 启用调试模式
+### 1. 启用详细日志
 
 在配置文件中设置：
-
-```yaml
-server:
-  mode: debug
-```
-
-### 2. 查看详细日志
 
 ```yaml
 log:
@@ -352,7 +345,7 @@ log:
   format: json
 ```
 
-### 3. 使用 pprof 进行性能分析
+### 2. 使用 pprof 进行性能分析
 
 ```bash
 # 启动 pprof 服务器
@@ -362,7 +355,7 @@ go tool pprof http://localhost:8080/debug/pprof/profile
 go tool pprof http://localhost:8080/debug/pprof/heap
 ```
 
-### 4. 使用 Delve 调试器
+### 3. 使用 Delve 调试器
 
 ```bash
 # 安装 Delve
@@ -370,6 +363,9 @@ go install github.com/go-delve/delve/cmd/dlv@latest
 
 # 启动调试
 dlv debug cmd/gateway/main.go
+
+# 调试测试
+dlv test ./internal/config
 ```
 
 ## 代码规范

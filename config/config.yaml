@@ -9,7 +9,7 @@
 # =============================================================================
 server:
   port: 8080                    # 服务器监听端口号，范围：1-65535
-  mode: debug                   # 运行模式：debug（调试模式，详细日志）或 release（生产模式，精简日志）
+  mode: release                 # 运行模式：debug（调试模式，详细日志）或 release（生产模式，精简日志）
   read_timeout: "60s"           # 读取请求的超时时间，支持单位：ns, us, ms, s, m, h
   write_timeout: "60s"          # 写入响应的超时时间，支持单位：ns, us, ms, s, m, h
   max_header_bytes: 1048576     # 请求头的最大字节数，1MB = 1024*1024
@@ -19,7 +19,7 @@ server:
 # 日志配置部分（基础设置，全局生效）
 # =============================================================================
 log:
-  level: info                   # 日志级别：debug, info, warn, error（从左到右级别递增）
+  level: warn                   # 日志级别：debug, info, warn, error（从左到右级别递增）
   format: json                  # 日志格式：json（结构化）或 text（可读性更好）
   output: stdout                # 日志输出位置：stdout（标准输出）或文件路径（如：/var/log/gateway.log）
   max_size: 100                 # 单个日志文件最大大小，单位：MB，超过后自动轮转
@@ -112,7 +112,7 @@ plugins:
       config:
         consumers:
           auth_api: "/auth/realms/paas/protocol/openid-connect/unauthorized"
-          host: "127.0.0.1:1234"
+          host: "172.17.0.2:80"
         white_interfaces:
           - "/info"
           - "/health"
@@ -236,7 +236,7 @@ routes:
       path: /api                # 匹配路径前缀
       priority: 90              # 路由优先级
     target:
-      url: http://192.168.100.69:80  # 目标服务地址
+      url: http://172.17.0.2:80  # 目标服务地址
       timeout: 30000            # 请求超时时间
       retries: 3                # 重试次数
     plugins: ["interface_auth"]  # 该路由使用的插件列表
@@ -246,12 +246,11 @@ routes:
   - name: tenant1-service
     match:
       type: prefix
-      path: /api
-      host: "*.tenant1.example.com"  # 支持通配符
+      path: /aapi
       priority: 90
     target:
-      url: http://tenant1-service:8080
-    plugins: ["rate_limit"]
+      url: http://172.17.0.2:80
+    plugins: []
 
   # 版本管理 - 基于主机名的API版本控制
   - name: v1-api

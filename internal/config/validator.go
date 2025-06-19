@@ -33,10 +33,6 @@ func validateServerConfig(config *ServerConfig) error {
 		return fmt.Errorf("无效的端口号: %d", config.Port)
 	}
 
-	if config.Mode != "debug" && config.Mode != "release" {
-		return fmt.Errorf("无效的运行模式: %s", config.Mode)
-	}
-
 	if config.ReadTimeout <= 0 {
 		return fmt.Errorf("无效的读取超时时间: %v", config.ReadTimeout)
 	}

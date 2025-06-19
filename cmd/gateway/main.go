@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -12,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"gateway-go/internal/config"
 	"gateway-go/internal/logger"
@@ -26,6 +29,7 @@ import (
 	"gateway-go/internal/router"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 var (
@@ -179,8 +183,16 @@ func startServer() error {
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
 
-	// 初始化日志系统
+	// 根据配置文件设置 gin 运行模式
 	cfg := configManager.GetConfig()
+	if cfg.Server.Mode == "release" {
+		gin.SetMode(gin.ReleaseMode)
+	} else if cfg.Server.Mode == "test" {
+		gin.SetMode(gin.TestMode)
+	} else {
+		gin.SetMode(gin.DebugMode)
+	}
+	// 初始化日志系统
 	if err := logger.Init(&cfg.Log); err != nil {
 		return fmt.Errorf("初始化日志失败: %w", err)
 	}
@@ -404,13 +416,57 @@ func registerRoutes(r *gin.Engine) {
 
 	// 创建路由处理中间件
 	r.Use(func(c *gin.Context) {
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
+			req := c.Request
+			headers := make(map[string][]string)
+			for k, v := range req.Header {
+				headers[k] = v
+			}
+			// 读取body内容（最多4KB）
+			var bodyStr string
+			if req.Body != nil {
+				bodyBytes, _ := io.ReadAll(io.LimitReader(req.Body, 4096))
+				bodyStr = string(bodyBytes)
+				// 还原body供后续处理
+				req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			}
+			startTime := time.Now()
+			// 捕获响应体
+			blw := &bodyLogWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
+			c.Writer = blw
+			// 1. 收到请求
+			logger.Log.Debug("收到请求",
+				zap.String("method", req.Method),
+				zap.String("path", req.URL.Path),
+				zap.String("raw_query", req.URL.RawQuery),
+				zap.Any("standard_headers", headers),
+				zap.String("client_ip", c.ClientIP()),
+				zap.Time("start_time", startTime),
+				zap.String("body", bodyStr),
+			)
+			c.Set("_debug_start_time", startTime)
+			c.Set("_debug_req_body", bodyStr)
+			c.Set("_debug_headers", headers)
+		}
+
 		path := c.Request.URL.Path
 		var matchedRoute *config.RouteConfig
 
 		// 查找匹配的路由
 		for _, route := range routes {
-			if matchRoute(path, route.Match) {
+			if matchRoute(path, route.Match, c) {
 				matchedRoute = &route
+				if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
+					headers, _ := c.Get("_debug_headers")
+					logger.Log.Debug("匹配到路由",
+						zap.String("route_name", route.Name),
+						zap.String("method", c.Request.Method),
+						zap.String("path", c.Request.URL.Path),
+						zap.String("match_type", route.Match.Type),
+						zap.String("match_path", route.Match.Path),
+						zap.Any("standard_headers", headers),
+					)
+				}
 				break
 			}
 		}
@@ -426,6 +482,12 @@ func registerRoutes(r *gin.Engine) {
 
 		// 执行插件链
 		if err := pluginManager.Execute(c, matchedRoute.Name); err != nil {
+			if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
+				logger.Log.Warn("插件执行失败",
+					zap.String("route_name", matchedRoute.Name),
+					zap.String("error", err.Error()),
+				)
+			}
 			c.JSON(500, gin.H{
 				"error": err.Error(),
 			})
@@ -462,11 +524,25 @@ func registerRoutes(r *gin.Engine) {
 		// 创建反向代理
 		target, err := url.Parse(matchedRoute.Target.URL)
 		if err != nil {
+			if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
+				logger.Log.Warn("目标URL无效",
+					zap.String("route_name", matchedRoute.Name),
+					zap.String("target_url", matchedRoute.Target.URL),
+					zap.String("error", err.Error()),
+				)
+			}
 			c.JSON(500, gin.H{
 				"error": fmt.Sprintf("无效的目标URL: %v", err),
 			})
 			c.Abort()
 			return
+		}
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
+			logger.Log.Debug("开始转发请求",
+				zap.String("target_url", matchedRoute.Target.URL),
+				zap.String("method", c.Request.Method),
+				zap.String("path", c.Request.URL.Path),
+			)
 		}
 
 		// 处理路径前缀
@@ -480,7 +556,6 @@ func registerRoutes(r *gin.Engine) {
 
 		// 创建反向代理
 		proxy := httputil.NewSingleHostReverseProxy(target)
-
 		// 设置自定义的 Director
 		originalDirector := proxy.Director
 		proxy.Director = func(req *http.Request) {
@@ -490,21 +565,78 @@ func registerRoutes(r *gin.Engine) {
 			req.Header.Set("X-Forwarded-Host", c.Request.Host)
 			req.Header.Set("X-Origin-Host", target.Host)
 		}
-
 		// 设置错误处理
 		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+			if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
+				logger.Log.Warn("反向代理失败",
+					zap.String("route_name", matchedRoute.Name),
+					zap.String("target_url", matchedRoute.Target.URL),
+					zap.String("error", err.Error()),
+				)
+			}
 			c.JSON(http.StatusBadGateway, gin.H{
 				"error": fmt.Sprintf("代理请求失败: %v", err),
 			})
 		}
-
+		// 捕获后端响应体
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
+				respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				logger.Log.Debug("收到后端响应",
+					zap.String("target_url", matchedRoute.Target.URL),
+					zap.Int("status", resp.StatusCode),
+					zap.String("resp_body", string(respBody)),
+				)
+				resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
+			}
+			return nil
+		}
 		// 执行代理请求
 		proxy.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
+			startTime, _ := c.Get("_debug_start_time")
+			cost := time.Since(startTime.(time.Time))
+			logger.Log.Debug("返回给用户",
+				zap.String("method", c.Request.Method),
+				zap.String("path", c.Request.URL.Path),
+				zap.Duration("cost", cost),
+			)
+		}
+
+		// access log: info 级别下简洁日志
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.InfoLevel) && !logger.Log.Core().Enabled(zap.DebugLevel) {
+			startTime := time.Now()
+			blw := &bodyLogWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
+			c.Writer = blw
+			c.Next()
+			cost := time.Since(startTime)
+			statusCode := c.Writer.Status()
+			target := "-"
+			if v, ok := c.Get("target"); ok {
+				target, _ = v.(string)
+			}
+			logger.Log.Info("access",
+				zap.String("method", c.Request.Method),
+				zap.String("path", c.Request.URL.Path),
+				zap.Int("status", statusCode),
+				zap.Duration("cost", cost),
+				zap.String("client_ip", c.ClientIP()),
+				zap.String("target", target),
+			)
+		}
+		return
 	})
 
 	// 注册一个通配符路由来捕获所有请求
 	r.NoRoute(func(c *gin.Context) {
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
+			logger.Log.Warn("未匹配到路由",
+				zap.String("method", c.Request.Method),
+				zap.String("path", c.Request.URL.Path),
+				zap.String("client_ip", c.ClientIP()),
+			)
+		}
 		c.JSON(404, gin.H{
 			"error": "未找到匹配的路由",
 		})
@@ -512,15 +644,42 @@ func registerRoutes(r *gin.Engine) {
 }
 
 // matchRoute 检查路径是否匹配路由规则
-func matchRoute(path string, match config.RouteMatch) bool {
+func matchRoute(path string, match config.RouteMatch, c *gin.Context) bool {
+	// 路径匹配
+	matched := false
 	switch match.Type {
 	case "exact":
-		return path == match.Path
+		matched = path == match.Path
 	case "prefix":
-		return strings.HasPrefix(path, match.Path)
+		matched = strings.HasPrefix(path, match.Path)
 	default:
-		return path == match.Path
+		matched = path == match.Path
 	}
+	if !matched {
+		return false
+	}
+	// Host 匹配
+	if match.Host != "" && c.Request.Host != match.Host {
+		return false
+	}
+	// Method 匹配
+	if match.Method != "" && c.Request.Method != match.Method {
+		return false
+	}
+	// Headers 匹配
+	for k, v := range match.Headers {
+		reqVal := c.GetHeader(k)
+		if reqVal != v {
+			return false
+		}
+	}
+	// QueryParams 匹配
+	for k, v := range match.QueryParams {
+		if c.Query(k) != v {
+			return false
+		}
+	}
+	return true
 }
 
 // writePIDFile 写入PID文件
@@ -539,4 +698,16 @@ func readPIDFile() (int, error) {
 	var pid int
 	_, err = fmt.Sscanf(string(data), "%d", &pid)
 	return pid, err
+}
+
+// 在文件末尾添加 bodyLogWriter 定义
+
+type bodyLogWriter struct {
+	gin.ResponseWriter
+	body *bytes.Buffer
+}
+
+func (w *bodyLogWriter) Write(b []byte) (int, error) {
+	w.body.Write(b)
+	return w.ResponseWriter.Write(b)
 }

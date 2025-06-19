@@ -47,12 +47,26 @@ func Init(config *config.LogConfig) error {
 		EncodeCaller:   zapcore.ShortCallerEncoder,
 	}
 
+	// 根据 format 字段选择编码器
+	var encoder zapcore.Encoder
+	if config.Format == "text" {
+		encoder = zapcore.NewConsoleEncoder(encoderConfig)
+	} else {
+		// info 级别精简日志：去掉 level、caller、msg 字段
+		if config.Level == "info" {
+			encoderConfig.LevelKey = ""
+			encoderConfig.CallerKey = ""
+			encoderConfig.MessageKey = ""
+		}
+		encoder = zapcore.NewJSONEncoder(encoderConfig)
+	}
+
 	// 配置输出
 	var writeSyncer zapcore.WriteSyncer
-	if config.Format == "json" {
-		writeSyncer = zapcore.AddSync(writer)
-	} else {
+	if config.Output == "stdout" {
 		writeSyncer = zapcore.AddSync(os.Stdout)
+	} else {
+		writeSyncer = zapcore.AddSync(writer)
 	}
 
 	// 配置日志级别
@@ -70,7 +84,7 @@ func Init(config *config.LogConfig) error {
 
 	// 创建核心
 	core := zapcore.NewCore(
-		zapcore.NewJSONEncoder(encoderConfig),
+		encoder,
 		writeSyncer,
 		level,
 	)
