@@ -10,7 +10,6 @@ type TrieNode struct {
 	children map[string]*TrieNode
 	route    *RouteDefinition
 	isEnd    bool
-	mu       sync.RWMutex
 }
 
 // TrieRouter 基于Trie树的路由器
