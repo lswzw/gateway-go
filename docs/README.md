@@ -35,6 +35,10 @@
 - **[安全配置](best-practices/security.md)** - 安全配置建议
 - **[监控告警](best-practices/monitoring.md)** - 监控和告警配置
 
+### 📊 性能测试
+- **[性能测试报告](performance-testing.md)** - 完整的压测报告和性能分析
+- **[性能优化方案](performance-optimization.md)** - 具体的代码优化实现方案
+
 ## 📝 文档更新
 
 - **最后更新**: 2025年06月
