@@ -2,6 +2,42 @@
 
 这是一个基于 Go 语言开发的高性能 API 网关服务，支持动态配置、路由转发和插件化扩展功能。
 
+## 项目架构图
+
+下图展示了 Go API 网关服务的核心架构组件及其交互关系：
+
+```mermaid
+flowchart TD
+    A["客户端（Client）"] -->|HTTP 请求| B["API 网关服务（Gin HTTP Server）"]
+    B --> C["中间件系统\n（日志、错误处理等）"]
+    C --> D["路由管理器\n（路由匹配/转发）"]
+    D --> E["插件系统\n（认证、限流、熔断、跨域等）"]
+    E --> F["目标服务（上游服务）"]
+    B <-->|配置变更通知| G["配置中心\n（热更新/版本管理）"]
+    G -->|配置下发| B
+    B --> H["监控系统\n（Prometheus/Tracing）"]
+    B --> I["错误处理系统"]
+    style A fill:#f9f,stroke:#333,stroke-width:1px
+    style F fill:#bbf,stroke:#333,stroke-width:1px
+    style G fill:#bfb,stroke:#333,stroke-width:1px
+    style H fill:#ffb,stroke:#333,stroke-width:1px
+    style I fill:#fbb,stroke:#333,stroke-width:1px
+    style B fill:#fff,stroke:#333,stroke-width:2px
+    style C fill:#fff,stroke:#333,stroke-width:1px
+    style D fill:#fff,stroke:#333,stroke-width:1px
+    style E fill:#fff,stroke:#333,stroke-width:1px
+    linkStyle 1,2,3,4 stroke:#888,stroke-width:1px,stroke-dasharray: 5 5
+```
+
+> **说明**：
+> - 客户端请求首先进入 API 网关服务，由 Gin HTTP Server 负责接收。
+> - 全局中间件（如日志、错误处理）先行处理请求。
+> - 路由管理器根据配置进行路由匹配和转发。
+> - 插件系统按需执行认证、限流、熔断、跨域等插件。
+> - 最终请求被转发到目标上游服务。
+> - 配置中心支持热更新，变更会实时通知网关服务。
+> - 网关服务集成监控与错误处理系统，保障可观测性与稳定性。
+
 ## 功能特点
 
 - 🚀 **高性能**：基于 Gin 框架，支持高并发处理
