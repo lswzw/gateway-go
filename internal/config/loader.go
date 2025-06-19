@@ -36,8 +36,6 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
 	}
 
-	fmt.Printf("[DEBUG] viper.AllSettings: %+v\n", v.AllSettings())
-
 	// 解析配置
 	var config Config
 	decoderConfig := &mapstructure.DecoderConfig{

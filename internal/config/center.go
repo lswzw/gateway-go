@@ -169,36 +169,6 @@ func (cc *ConfigCenter) UpdateConfig(newConfig *Config, comment string) error {
 	// 创建合并后的配置
 	mergedConfig := *currentConfig
 
-	// 添加调试日志
-	fmt.Printf("[DEBUG] 当前配置端口: %d\n", currentConfig.Server.Port)
-	fmt.Printf("[DEBUG] 新配置端口: %d\n", newConfig.Server.Port)
-
-	// 注意：不更新需要重启服务的配置项（如端口）
-	// 只更新可以热更新的配置项
-
-	// 合并服务器配置 - 只更新可以热更新的配置
-	// 不更新端口，因为需要重启服务
-	// if newConfig.Server.Port > 0 {
-	// 	mergedConfig.Server.Port = newConfig.Server.Port
-	// 	fmt.Printf("[DEBUG] 更新端口为: %d\n", newConfig.Server.Port)
-	// }
-	// if newConfig.Server.Mode != "" {
-	//  mergedConfig.Server.Mode = newConfig.Server.Mode
-	// }
-	// 不更新超时配置，因为需要重启服务
-	// if newConfig.Server.ReadTimeout > 0 {
-	// 	mergedConfig.Server.ReadTimeout = newConfig.Server.ReadTimeout
-	// }
-	// if newConfig.Server.WriteTimeout > 0 {
-	// 	mergedConfig.Server.WriteTimeout = newConfig.Server.WriteTimeout
-	// }
-	// if newConfig.Server.MaxHeaderBytes > 0 {
-	// 	mergedConfig.Server.MaxHeaderBytes = newConfig.Server.MaxHeaderBytes
-	// }
-	// if newConfig.Server.GracefulShutdownTimeout > 0 {
-	// 	mergedConfig.Server.GracefulShutdownTimeout = newConfig.Server.GracefulShutdownTimeout
-	// }
-
 	// 合并日志配置 - 只更新非零值
 	if newConfig.Log.Level != "" {
 		mergedConfig.Log.Level = newConfig.Log.Level
@@ -229,7 +199,19 @@ func (cc *ConfigCenter) UpdateConfig(newConfig *Config, comment string) error {
 		mergedConfig.Routes = newConfig.Routes
 	}
 
-	fmt.Printf("[DEBUG] 合并后配置端口: %d\n", mergedConfig.Server.Port)
+	// 合并服务器配置 - 只更新可热更新的配置项
+	if newConfig.Server.ReadTimeout != 0 {
+		mergedConfig.Server.ReadTimeout = newConfig.Server.ReadTimeout
+	}
+	if newConfig.Server.WriteTimeout != 0 {
+		mergedConfig.Server.WriteTimeout = newConfig.Server.WriteTimeout
+	}
+	if newConfig.Server.MaxHeaderBytes > 0 {
+		mergedConfig.Server.MaxHeaderBytes = newConfig.Server.MaxHeaderBytes
+	}
+	if newConfig.Server.GracefulShutdownTimeout > 0 {
+		mergedConfig.Server.GracefulShutdownTimeout = newConfig.Server.GracefulShutdownTimeout
+	}
 
 	// 验证合并后的配置
 	if err := ValidateConfig(&mergedConfig); err != nil {

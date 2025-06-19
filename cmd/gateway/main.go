@@ -38,7 +38,6 @@ var (
 	routerManager *router.Manager
 	globalServer  *http.Server
 	globalEngine  *gin.Engine
-	routeHandlers map[string]gin.HandlerFunc // 存储路由处理器
 )
 
 // 命令行参数
@@ -215,9 +214,6 @@ func startServer() error {
 
 	// 初始化路由管理器
 	routerManager = router.NewManagerFromConfig(configManager, pluginManager)
-
-	// 初始化路由处理器映射
-	routeHandlers = make(map[string]gin.HandlerFunc)
 
 	// 添加配置重载钩子
 	configManager.AddReloadHook(func(cfg *config.Config) error {
@@ -625,7 +621,6 @@ func registerRoutes(r *gin.Engine) {
 				zap.String("target", target),
 			)
 		}
-		return
 	})
 
 	// 注册一个通配符路由来捕获所有请求
