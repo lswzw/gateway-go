@@ -72,6 +72,9 @@ type Manager struct {
 	regexCache    map[string]*regexp.Regexp
 	configManager *config.ConfigManager
 	configCenter  *config.ConfigCenter // 保持向后兼容
+
+	trieRouter *TrieRouter // Trie 路由器
+	routeCache *RouteCache // 路由缓存
 }
 
 // NewManager 创建路由管理器
@@ -156,6 +159,16 @@ func (m *Manager) loadConfig() error {
 
 	m.mu.Lock()
 	m.config = &config
+
+	// 构建 Trie 路由树
+	m.trieRouter = NewTrieRouter()
+	for i := range config.Routes {
+		m.trieRouter.Insert(config.Routes[i].Match.Path, &config.Routes[i])
+	}
+
+	// 初始化路由缓存
+	m.routeCache = NewRouteCache(1024)
+
 	m.mu.Unlock()
 
 	return nil
@@ -292,6 +305,43 @@ func (m *Manager) MatchRoute(c *gin.Context) (*TargetService, error) {
 		return nil, fmt.Errorf("路由配置未加载")
 	}
 
+	path := c.Request.URL.Path
+
+	// 1. 优先查缓存
+	if m.routeCache != nil {
+		if route, ok := m.routeCache.Get(path); ok {
+			if m.matchRule(c, route.Match) {
+				if err := m.pluginManager.Execute(c, route.Name); err != nil {
+					return nil, err
+				}
+				if route.Match.ABTest != nil && route.Match.ABTest.Enabled {
+					return m.handleABTest(c, route)
+				}
+				return &route.Target, nil
+			}
+		}
+	}
+
+	// 2. Trie 路由查找
+	if m.trieRouter != nil {
+		if route, ok := m.trieRouter.Match(path); ok {
+			if m.matchRule(c, route.Match) {
+				// 命中后写入缓存
+				if m.routeCache != nil {
+					m.routeCache.Set(path, route)
+				}
+				if err := m.pluginManager.Execute(c, route.Name); err != nil {
+					return nil, err
+				}
+				if route.Match.ABTest != nil && route.Match.ABTest.Enabled {
+					return m.handleABTest(c, route)
+				}
+				return &route.Target, nil
+			}
+		}
+	}
+
+	// 3. 兜底：原有线性遍历
 	var bestMatch *RouteDefinition
 	highestPriority := -1
 
@@ -310,12 +360,15 @@ func (m *Manager) MatchRoute(c *gin.Context) (*TargetService, error) {
 		return nil, fmt.Errorf("未找到匹配的路由规则")
 	}
 
-	// 执行插件链
+	// 命中后写入缓存
+	if m.routeCache != nil {
+		m.routeCache.Set(path, bestMatch)
+	}
+
 	if err := m.pluginManager.Execute(c, bestMatch.Name); err != nil {
 		return nil, err
 	}
 
-	// 处理A/B测试
 	if bestMatch.Match.ABTest != nil && bestMatch.Match.ABTest.Enabled {
 		return m.handleABTest(c, bestMatch)
 	}

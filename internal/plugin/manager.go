@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"gateway-go/internal/plugin/chain"
 	"gateway-go/internal/plugin/core"
@@ -20,6 +21,8 @@ type Manager struct {
 	// 插件注册表（保持向后兼容）
 	registry map[string]core.Plugin
 	mu       sync.RWMutex
+
+	pluginCache *PluginCache // 插件结果缓存
 }
 
 // NewManager 创建插件管理器
@@ -28,6 +31,7 @@ func NewManager() *Manager {
 		availablePlugins: make(map[string]core.Plugin),
 		routeChains:      make(map[string]*chain.Chain),
 		registry:         make(map[string]core.Plugin),
+		pluginCache:      NewPluginCache(10 * time.Second), // 默认10秒，可调整
 	}
 }
 
@@ -95,7 +99,7 @@ func (m *Manager) LoadRoutePlugins(routeName string, pluginNames []string) error
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	chain := chain.NewChain()
+	ch := chain.NewChainWithCache(m.pluginCache, GenerateCacheKey)
 
 	// 根据插件名称加载路由插件
 	for _, pluginName := range pluginNames {
@@ -104,10 +108,10 @@ func (m *Manager) LoadRoutePlugins(routeName string, pluginNames []string) error
 			return fmt.Errorf("路由 %s 使用的插件 %s 不可用", routeName, pluginName)
 		}
 
-		chain.AddPlugin(p)
+		ch.AddPlugin(p)
 	}
 
-	m.routeChains[routeName] = chain
+	m.routeChains[routeName] = ch
 	return nil
 }
 

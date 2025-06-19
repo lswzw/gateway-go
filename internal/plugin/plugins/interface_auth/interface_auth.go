@@ -111,6 +111,7 @@ func (p *Plugin) Execute(ctx *gin.Context) error {
 
 	// 检查是否在白名单中
 	if p.isWhiteListed(path) {
+		ctx.Set("plugin_result_interface_auth", "whitelist")
 		return nil // 白名单直接放行
 	}
 
@@ -127,6 +128,8 @@ func (p *Plugin) Execute(ctx *gin.Context) error {
 		return err
 	}
 
+	// 认证成功，写入缓存结果
+	ctx.Set("plugin_result_interface_auth", "success")
 	return nil
 }
 
