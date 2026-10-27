@@ -21,15 +21,20 @@
 
 | 名称                | 数据类型         | 必填 | 默认值         | 描述                         |
 |---------------------|----------------|------|----------------|------------------------------|
-| requests_per_second | float          | 否   | 10             | 每秒请求数限制                |
-| burst               | int            | 否   | 20             | 突发请求数限制                |
-| dimension           | string         | 否   | ip             | 限流维度：ip/user/global      |
-| storage             | string         | 否   | memory         | 存储类型：memory/redis        |
-| redis               | object         | 否   | -              | Redis配置                     |
-| window_size         | int            | 否   | 60             | 时间窗口大小（秒）            |
-| skip_paths          | array of string| 否   | []             | 跳过限流的路径                |
-| error_code          | int            | 否   | 429            | 超限时HTTP状态码              |
-| error_message       | string         | 否   | Too Many Requests | 超限时错误信息             |
+| requests_per_second | number \| string | 否 | 10             | 每秒放行请求数；`100` / `100.0` / `"100"` 均可 |
+| burst               | int \| string  | 否   | 20             | 令牌桶容量（允许的突发量）；`0` 表示不放行任何请求 |
+| dimension           | string         | 否   | path           | 限流维度：`path`（按 URL 路径）/ `ip` / `user` / `global` |
+| user_header         | string         | 否   | X-User-ID      | `dimension: user` 时用于区分用户的请求头 |
+| max_entries         | int            | 否   | 10000          | 令牌桶数量上限，超出按 LRU 淘汰 |
+| ip_based            | bool           | 否   | false          | 历史字段，等价于 `dimension: ip`（`dimension` 优先） |
+| trusted_proxies     | array of string| 否   | 全局默认       | 解析客户端 IP 时信任的代理列表（`ip` 维度生效） |
+
+> 注意：
+> - `requests_per_second` / `burst` 走统一的数值归一化，YAML 里的整数、浮点、字符串都能正确解析（历史版本只认浮点，写 `100` 会静默回落成 10 rps）。
+> - 未配置 `dimension` 且未开启 `ip_based` 时保持历史行为：**按 URL 路径限流**（每个路径一个桶，所有客户端共享）。
+> - `dimension: user` 在请求未携带 `user_header` 时退化为按客户端 IP 限流，避免退化成全局限流误伤所有用户。
+>
+> 以下字段在文档中出现但**当前版本尚未实现**，配置后不生效：`storage` / `redis` / `window_size` / `skip_paths` / `error_code` / `error_message`。
 
 ## 五、配置示例
 

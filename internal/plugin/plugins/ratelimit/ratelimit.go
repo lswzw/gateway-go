@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,28 @@ import (
 
 // DefaultMaxEntries 默认最大令牌桶容量限制 (REQ-P1-02)
 const DefaultMaxEntries = 10000
+
+// 限流默认参数（与插件 README 保持一致）
+const (
+	// DefaultRate 默认每秒放行请求数
+	DefaultRate = 10.0
+	// DefaultBurst 默认令牌桶容量
+	DefaultBurst = 20
+	// DefaultUserHeader 按用户维度限流时默认读取的请求头
+	DefaultUserHeader = "X-User-ID"
+)
+
+// 限流维度
+const (
+	// DimensionPath 按 URL 路径限流（历史默认行为：每个路径一个桶）
+	DimensionPath = "path"
+	// DimensionIP 按客户端 IP 限流
+	DimensionIP = "ip"
+	// DimensionUser 按用户标识限流
+	DimensionUser = "user"
+	// DimensionGlobal 全局单一桶限流
+	DimensionGlobal = "global"
+)
 
 // TokenBucket 令牌桶
 type TokenBucket struct {
@@ -38,6 +61,11 @@ type bucketNode struct {
 type RateLimitPlugin struct {
 	*core.BasePlugin
 	config         map[string]interface{}
+	rate           float64                  // 令牌生成速率 requests_per_second（Init 阶段归一化）
+	burst          int64                    // 令牌桶容量 burst（Init 阶段归一化）
+	dimension      string                   // 限流维度：ip / user / global / path
+	userHeader     string                   // user 维度读取的请求头
+	configured     bool                     // Init 是否已执行（未初始化时使用默认参数）
 	buckets        map[string]*list.Element // key -> *list.Element with value *bucketNode
 	lruList        *list.List               // Front = 最常访问 (MRU), Back = 最久未访问 (LRU)
 	maxEntries     int                      // 最大令牌桶数量上限
@@ -72,12 +100,28 @@ func (p *RateLimitPlugin) Init(config interface{}) error {
 
 	// 解析最大容量上限 max_entries (默认 10000)
 	p.maxEntries = DefaultMaxEntries
-	if me, ok := configMap["max_entries"].(int); ok && me > 0 {
-		p.maxEntries = me
-	} else if me64, ok := configMap["max_entries"].(int64); ok && me64 > 0 {
-		p.maxEntries = int(me64)
-	} else if meF, ok := configMap["max_entries"].(float64); ok && meF > 0 {
-		p.maxEntries = int(meF)
+	if me, ok := toInt64(configMap["max_entries"]); ok && me > 0 {
+		p.maxEntries = int(me)
+	}
+
+	// 解析速率与桶容量。YAML/JSON 解码后可能是 int/int64/float64/字符串，必须归一化：
+	// 历史实现只做 float64 断言，于是 config.yaml 里 requests_per_second: 100 会被
+	// 静默回落成 10 rps（实测 10s 内只放行 299 次，而正确值应为约 1,196 次）。
+	p.rate = DefaultRate
+	if rps, ok := toFloat64(configMap["requests_per_second"]); ok && rps >= 0 {
+		p.rate = rps
+	}
+	p.burst = DefaultBurst
+	if b, ok := toInt64(configMap["burst"]); ok && b >= 0 {
+		p.burst = b
+	}
+	p.configured = true
+
+	// 限流维度：dimension 优先，ip_based 作为历史别名
+	p.dimension = resolveDimension(configMap)
+	p.userHeader = DefaultUserHeader
+	if h, ok := configMap["user_header"].(string); ok && strings.TrimSpace(h) != "" {
+		p.userHeader = strings.TrimSpace(h)
 	}
 
 	// 初始化可信代理
@@ -135,18 +179,34 @@ func (p *RateLimitPlugin) Execute(ctx *gin.Context) error {
 }
 
 // getLimitKey 获取限流键
+//
+// 支持 dimension: ip / user / global / path（默认 path，兼容历史行为）。
+// 历史实现只识别 ip_based 布尔开关，导致文档化的 dimension: ip 实际退化成
+// "按 URL 路径全局限流"，所有客户端共享一个令牌桶。
 func (p *RateLimitPlugin) getLimitKey(c *gin.Context) string {
-	// 如果配置了基于IP限流，则使用IP作为键
-	if ipBased, ok := p.config["ip_based"].(bool); ok && ipBased {
-		trusted := p.trustedProxies
-		if len(trusted) == 0 {
-			trusted = netutil.GetDefaultTrustedProxies()
+	switch p.dimension {
+	case DimensionIP:
+		return p.clientIP(c)
+	case DimensionUser:
+		if v := strings.TrimSpace(c.GetHeader(p.userHeader)); v != "" {
+			return v
 		}
-		return netutil.ClientIP(c, trusted)
+		// 未携带用户标识时退化为按 IP 限流，避免退化成全局限流误伤所有用户
+		return p.clientIP(c)
+	case DimensionGlobal:
+		return DimensionGlobal
+	default:
+		return c.Request.URL.Path
 	}
+}
 
-	// 默认使用路径作为限流键
-	return c.Request.URL.Path
+// clientIP 返回可信代理链解析后的客户端 IP
+func (p *RateLimitPlugin) clientIP(c *gin.Context) string {
+	trusted := p.trustedProxies
+	if len(trusted) == 0 {
+		trusted = netutil.GetDefaultTrustedProxies()
+	}
+	return netutil.ClientIP(c, trusted)
 }
 
 // getBucket 获取或创建令牌桶 (LRU 淘汰保证内存有界 REQ-P1-02)
@@ -170,24 +230,18 @@ func (p *RateLimitPlugin) getBucket(key string) *TokenBucket {
 		}
 	}
 
-	// 从配置中获取参数
-	requestsPerSecond := 10.0
-	burst := 20
-
-	if rps, ok := p.config["requests_per_second"].(float64); ok {
-		requestsPerSecond = rps
-	}
-	if b, ok := p.config["burst"].(int); ok {
-		burst = b
-	} else if bF, ok := p.config["burst"].(float64); ok {
-		burst = int(bF)
+	// 桶参数已在 Init 阶段完成类型归一化；未执行 Init 时退回默认参数。
+	// 注意 burst=0 是合法配置（桶容量 0，等价于全部限流），不可被默认值覆盖。
+	rate, capacity := p.rate, p.burst
+	if !p.configured {
+		rate, capacity = DefaultRate, DefaultBurst
 	}
 
 	// 创建新的令牌桶
 	bucket := &TokenBucket{
-		rate:       requestsPerSecond,
-		capacity:   int64(burst),
-		tokens:     int64(burst),
+		rate:       rate,
+		capacity:   capacity,
+		tokens:     capacity,
 		lastRefill: time.Now().UnixNano(),
 	}
 
@@ -297,4 +351,94 @@ func min(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// resolveDimension 解析限流维度
+//
+// 优先级：dimension 字段 > ip_based（历史别名）> path（历史默认行为）。
+// 非法/未配置时回落到 path，保持与既有部署的兼容性。
+func resolveDimension(cfg map[string]interface{}) string {
+	if raw, ok := cfg["dimension"].(string); ok {
+		switch dim := strings.ToLower(strings.TrimSpace(raw)); dim {
+		case DimensionIP, DimensionUser, DimensionGlobal:
+			return dim
+		}
+	}
+	if ipBased, ok := cfg["ip_based"].(bool); ok && ipBased {
+		return DimensionIP
+	}
+	return DimensionPath
+}
+
+// toFloat64 将配置值归一化为 float64
+//
+// 配置文件经 YAML/JSON 解码后数值可能是 int / int64 / uint64 / float32 / float64 /
+// 字符串，单一类型断言会造成静默回落，因此统一走这里转换。
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int8:
+		return float64(n), true
+	case int16:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint8:
+		return float64(n), true
+	case uint16:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+// toInt64 将配置值归一化为 int64
+func toInt64(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int8:
+		return int64(n), true
+	case int16:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case uint:
+		return int64(n), true
+	case uint8:
+		return int64(n), true
+	case uint16:
+		return int64(n), true
+	case uint32:
+		return int64(n), true
+	case uint64:
+		return int64(n), true
+	case float32:
+		return int64(n), true
+	case float64:
+		return int64(n), true
+	case string:
+		if i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64); err == nil {
+			return i, true
+		}
+	}
+	return 0, false
 }
