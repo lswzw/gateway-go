@@ -767,24 +767,22 @@ config.(*ConfigManager).HandleSignals.func1  internal/config/manager.go:376
 2. 路由级连接池配置仍是规划项。
 3. `rate_limit` 的 `storage` / `redis` / `window_size` / `skip_paths` / `error_code` / `error_message` 均未实现（已在插件 README 标注）。
 
-### 6.6 压测环境复现
+### 6.6 复现方式
 
-压测资产已入库到 `bench/`（脚本 + 配置 + 说明）：
+压测脚本不随仓库分发（开源仓库只保留代码与结论）。复现时按下述口径自建环境：
 
-```bash
-./bench/run.sh up        # 构建二进制、建网络、起后端与压测容器
-./bench/run.sh matrix    # 基准矩阵：100/200/400 × direct/self/noplug/plug
-./bench/run.sh hiconc    # 高并发：800/1600 × 默认参数/内核调优
-./bench/run.sh soak      # 长稳：180 s @ c=100
-./bench/run.sh reload    # 带载 SIGHUP 验证重载不中断
-./bench/run.sh down
-```
+1. 三个容器：网关 4C/2G（静态编译二进制，`server.mode: release`、`log.level: error`）、
+   后端 nginx 4C/2G（`access_log off`、固定返回 `backend-ok`）、压测端 4C/4G（`hey`）。
+2. 被测路径：`/`（网关内部响应）、`/noplug`（纯转发）、`/plug`（转发 + rate_limit / circuit_breaker / cors）。
+3. 每个用例前重启网关与后端容器（清空网络命名空间内残留的 `TIME_WAIT` 与限流令牌桶），
+   预热 5s、计时 25s，延迟取 p50/p90/p99。
+4. 结果需与管理端口 `/metrics` 的 `gateway_requests_total` 增量交叉校验，避免工具口径偏差。
 
 ---
 
 ## 7. 2026-10 第二轮优化：认证缓存 / 池治理 / 转发固定开销
 
-> 复测数据见[性能测试报告](performance-testing.md) §5.3。压测脚本见 `bench/`。
+> 复测数据见[性能测试报告](performance-testing.md) §5.3。
 
 ### 7.1 认证缓存（`interface_auth`）
 

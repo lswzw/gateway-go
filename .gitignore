@@ -74,5 +74,5 @@ __debug_bin
 
 # Local development files
 .local/ 
-# 压测原始输出（脚本生成，不入库）
-bench/results/
+# Agent/IDE 本地数据（不进版本库）
+.codebuddy/
