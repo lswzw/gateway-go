@@ -181,6 +181,24 @@ func (m *Manager) ReloadFromConfig(configManager *config.ConfigManager, pluginMa
 	return m.loadConfigFromManager()
 }
 
+// ReloadFromSnapshot 直接使用给定的配置快照重建路由表
+//
+// 与 ReloadFromConfig 的区别：不回头向 ConfigManager 取配置。配置重载流程中
+// ConfigManager 可能正处于提交阶段，钩子内回调 GetConfig/GetVersion 会造成锁重入，
+// 因此重载钩子应当直接消费传入的配置快照。
+func (m *Manager) ReloadFromSnapshot(cfg *config.Config, pluginManager *plugin.Manager) error {
+	if cfg == nil {
+		return fmt.Errorf("配置快照为空")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.pluginManager = pluginManager
+	m.applyConfigRoutes(cfg.Routes)
+	return nil
+}
+
 // buildTrieAndCache 根据当前配置构建 Trie 路由器并重置缓存 (调用方需持有写锁)
 func (m *Manager) buildTrieAndCache() {
 	m.regexMu.Lock()

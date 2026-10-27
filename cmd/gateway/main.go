@@ -274,9 +274,11 @@ func startServer() error {
 	setupReloadLifecycle(configManager, globalDispatcher)
 
 	// 添加配置重载钩子 (同步 routerManager)
+	// 注意：必须使用传入的 cfg 快照，禁止在钩子内回调 configManager.GetConfig()，
+	// 否则与重载流程形成锁重入死锁（详见 ConfigManager.ReloadConfig 的锁纪律说明）。
 	configManager.AddReloadHook(func(cfg *config.Config) error {
 		if routerManager != nil {
-			return routerManager.ReloadFromConfig(configManager, pluginManager)
+			return routerManager.ReloadFromSnapshot(cfg, pluginManager)
 		}
 		return nil
 	})
@@ -983,7 +985,6 @@ func buildAccessFields(c *gin.Context, cfg *config.LogConfig, startTime time.Tim
 
 	return fields
 }
-
 
 // registerRoutes 注册业务路由
 func registerRoutes(r *gin.Engine) {

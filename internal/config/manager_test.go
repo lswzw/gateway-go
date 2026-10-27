@@ -377,3 +377,82 @@ func TestValidateConfig_AllBranches(t *testing.T) {
 	}
 }
 
+// TestReloadConfig_HookMayReadConfig 回归测试：重载钩子内必须允许回调 GetConfig/GetVersion。
+// 历史缺陷：ReloadConfig 全程持有 cm.mu 写锁后执行钩子，钩子内 GetConfig() 对同一把锁
+// 再次 RLock（sync.RWMutex 不可重入）→ 永久自死锁，随后所有读配置的请求一起挂死。
+// 这里用看门狗超时，避免缺陷回归时把测试进程永久挂住。
+func TestReloadConfig_HookMayReadConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(sampleValidConfig), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cm := NewConfigManager(cfgPath)
+	if err := cm.LoadConfig(cfgPath); err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	hookReadOK := false
+	cm.AddReloadHook(func(newCfg *Config) error {
+		// 模拟 cmd/gateway 中"同步 routerManager"的钩子：重载期间读取当前配置与版本号
+		if cm.GetConfig() != nil && cm.GetVersion() != "" {
+			hookReadOK = true
+		}
+		return nil
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- cm.ReloadConfig() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("reload failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ReloadConfig 3s 内未返回：钩子内读取配置导致锁重入死锁")
+	}
+
+	if !hookReadOK {
+		t.Errorf("expected hook to read config successfully")
+	}
+	if cm.GetVersion() != "2" {
+		t.Errorf("expected version 2 after reload, got %s", cm.GetVersion())
+	}
+}
+
+// TestReloadConfig_Serialized 重载必须串行：并发触发时版本号单调递增且不重复
+func TestReloadConfig_Serialized(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(sampleValidConfig), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cm := NewConfigManager(cfgPath)
+	if err := cm.LoadConfig(cfgPath); err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	const n = 5
+	done := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() { done <- cm.ReloadConfig() }()
+	}
+
+	for i := 0; i < n; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("concurrent reload failed: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("并发重载 5s 内未全部返回，可能存在死锁")
+		}
+	}
+
+	if got := cm.GetVersion(); got != "6" {
+		t.Errorf("expected version 6 after %d reloads, got %s", n, got)
+	}
+}

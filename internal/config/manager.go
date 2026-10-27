@@ -25,6 +25,7 @@ type ConfigManager struct {
 	viper         *viper.Viper
 	watcher       *fsnotify.Watcher
 	mu            sync.RWMutex
+	reloadMu      sync.Mutex
 	reloadChan    chan struct{}
 	stopChan      chan struct{}
 	reloadHooks   []func(*Config) error
@@ -138,99 +139,96 @@ func (cm *ConfigManager) LoadConfig(configPath string) error {
 }
 
 // ReloadConfig 热重载配置 - 类似 nginx -s reload
+//
+// 锁纪律：cm.mu 只保护状态字段的读写，绝不跨越用户回调（重载钩子 / 事件监听器）。
+// 重载之间的串行化由独立的 reloadMu 负责。历史上本方法全程持有 cm.mu 写锁再执行
+// 钩子，而钩子（cmd/gateway/main.go 中同步 routerManager 的钩子）会回调
+// cm.GetConfig() → 同一 goroutine 对已持有的写锁再次 RLock，sync.RWMutex 不可重入，
+// 于是永久自死锁；同时所有请求中间件都要读 GetConfig，数据面整体挂死而健康检查仍为 200。
 func (cm *ConfigManager) ReloadConfig() error {
 	startTime := time.Now()
 	fmt.Println("正在重新加载配置...")
 
-	// 1. 测试并解析新配置语法 (如果失败，不改变任何现有状态)
-	newConfig, err := cm.ParseConfigFile(cm.configPath)
-	if err != nil {
-		metrics.RecordReload("failure")
-		cm.mu.RLock()
-		oldVer := cm.version
-		if oldVer == "" {
-			oldVer = "1"
-		}
-		listener := cm.onReloadEvent
-		cm.mu.RUnlock()
+	// 同一时刻只允许一个重载流程执行
+	cm.reloadMu.Lock()
+	defer cm.reloadMu.Unlock()
 
-		duration := time.Since(startTime)
-		if listener != nil {
-			listener(oldVer, duration, false, err)
-		}
-		return fmt.Errorf("配置测试失败: %w", err)
-	}
-
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
+	// 1. 锁内只取状态快照，随即释放锁
+	cm.mu.RLock()
+	configPath := cm.configPath
 	currentVer := cm.version
+	versionSeq := cm.versionSeq
+	reloadHooks := append([]func(*Config) error(nil), cm.reloadHooks...)
+	prepareHook := cm.prepareHook
+	commitHook := cm.commitHook
+	rollbackHook := cm.rollbackHook
+	onReloadEvent := cm.onReloadEvent
+	cm.mu.RUnlock()
+
 	if currentVer == "" {
 		currentVer = "1"
-		cm.versionSeq = 1
+		versionSeq = 1
 	}
-	nextVersion := fmt.Sprintf("%d", cm.versionSeq+1)
+	nextVersion := fmt.Sprintf("%d", versionSeq+1)
 
-	// 2. 准备阶段：构建新路由快照与插件引擎
-	if cm.prepareHook != nil {
-		if err := cm.prepareHook(newConfig, nextVersion); err != nil {
-			metrics.RecordReload("failure")
-			if cm.rollbackHook != nil {
-				cm.rollbackHook(newConfig, err)
-			}
-			duration := time.Since(startTime)
-			if cm.onReloadEvent != nil {
-				cm.onReloadEvent(currentVer, duration, false, err)
-			}
-			return fmt.Errorf("准备新配置快照失败: %w", err)
+	// fail 统一处理重载失败：打点、回滚候选快照（解析成功后才需要）、通知监听器
+	var candidate *Config
+	fail := func(err error, rollback bool) error {
+		metrics.RecordReload("failure")
+		if rollback && rollbackHook != nil {
+			rollbackHook(candidate, err)
+		}
+		duration := time.Since(startTime)
+		if onReloadEvent != nil {
+			onReloadEvent(currentVer, duration, false, err)
+		}
+		return err
+	}
+
+	// 2. 测试并解析新配置语法 (如果失败，不改变任何现有状态)
+	newConfig, err := cm.ParseConfigFile(configPath)
+	if err != nil {
+		return fail(fmt.Errorf("配置测试失败: %w", err), false)
+	}
+	candidate = newConfig
+
+	// 3. 准备阶段：构建新路由快照与插件引擎 (锁外执行，允许钩子回调 GetConfig)
+	if prepareHook != nil {
+		if err := prepareHook(newConfig, nextVersion); err != nil {
+			return fail(fmt.Errorf("准备新配置快照失败: %w", err), true)
 		}
 	}
 
-	// 3. 执行重载钩子。若任何钩子失败，执行回滚并保留旧快照与版本号
-	for _, hook := range cm.reloadHooks {
+	// 4. 执行重载钩子。若任何钩子失败，执行回滚并保留旧快照与版本号
+	for _, hook := range reloadHooks {
 		if err := hook(newConfig); err != nil {
-			metrics.RecordReload("failure")
-			// 回滚：不应用新快照，保留旧配置与版本号
-			if cm.rollbackHook != nil {
-				cm.rollbackHook(newConfig, err)
-			}
-			duration := time.Since(startTime)
-			if cm.onReloadEvent != nil {
-				cm.onReloadEvent(currentVer, duration, false, err)
-			}
-			return fmt.Errorf("重载钩子执行失败: %w", err)
+			return fail(fmt.Errorf("重载钩子执行失败: %w", err), true)
 		}
 	}
 
-	// 4. 所有钩子成功，提交快照原子切换
-	if cm.commitHook != nil {
-		if err := cm.commitHook(newConfig, nextVersion); err != nil {
-			metrics.RecordReload("failure")
-			if cm.rollbackHook != nil {
-				cm.rollbackHook(newConfig, err)
-			}
-			duration := time.Since(startTime)
-			if cm.onReloadEvent != nil {
-				cm.onReloadEvent(currentVer, duration, false, err)
-			}
-			return fmt.Errorf("提交新配置快照失败: %w", err)
+	// 5. 所有钩子成功，提交快照原子切换
+	if commitHook != nil {
+		if err := commitHook(newConfig, nextVersion); err != nil {
+			return fail(fmt.Errorf("提交新配置快照失败: %w", err), true)
 		}
 	}
 
-	// 5. 更新配置与版本号
+	// 6. 提交状态：锁内仅做字段赋值，不执行任何回调
+	cm.mu.Lock()
 	cm.currentConfig = newConfig
-	cm.versionSeq++
+	cm.versionSeq = versionSeq + 1
 	cm.version = nextVersion
+	cm.mu.Unlock()
 
 	metrics.RecordReload("success")
-	metrics.SetConfigVersion(cm.version)
+	metrics.SetConfigVersion(nextVersion)
 
 	duration := time.Since(startTime)
-	if cm.onReloadEvent != nil {
-		cm.onReloadEvent(cm.version, duration, true, nil)
+	if onReloadEvent != nil {
+		onReloadEvent(nextVersion, duration, true, nil)
 	}
 
-	fmt.Printf("✓ 配置重载成功 (版本: %s, 耗时: %v)\n", cm.version, duration)
+	fmt.Printf("✓ 配置重载成功 (版本: %s, 耗时: %v)\n", nextVersion, duration)
 	return nil
 }
 
