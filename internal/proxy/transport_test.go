@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/url"
 	"testing"
 	"time"
 )
@@ -69,5 +70,65 @@ func TestTransport_IdlePoolCoversConcurrency(t *testing.T) {
 	}
 	if tr.DisableKeepAlives {
 		t.Error("DisableKeepAlives 必须为 false，否则每个请求都会新建连接")
+	}
+}
+
+// TestPoolKey 池键必须按上游 host 归并（而不是按路由名）
+func TestPoolKey(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"http://10.0.0.1:8080/api", "http://10.0.0.1:8080"},
+		{"https://backend.svc:443/", "https://backend.svc:443"},
+		{"http://backend.svc/", "http://backend.svc"},
+	}
+	for _, tc := range cases {
+		u, err := url.Parse(tc.raw)
+		if err != nil {
+			t.Fatalf("parse %s: %v", tc.raw, err)
+		}
+		if got := PoolKey(u); got != tc.want {
+			t.Errorf("PoolKey(%s) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+	if got := PoolKey(nil); got != "" {
+		t.Errorf("nil url 应返回空键，实际 %q", got)
+	}
+}
+
+// TestTransportPool_Reconcile 回收未被引用的池，保留仍在使用中的池实例
+func TestTransportPool_Reconcile(t *testing.T) {
+	pool := NewTransportPool()
+
+	keep := pool.GetTransport("http://a:80")
+	stale := pool.GetTransport("http://b:80")
+
+	if released := pool.Reconcile([]string{"http://a:80"}); released != 1 {
+		t.Fatalf("expected 1 released pool, got %d", released)
+	}
+	if again := pool.GetTransport("http://a:80"); again != keep {
+		t.Error("仍被引用的池必须保留原实例")
+	}
+	// b 的池已被摘除，再次获取应创建新实例
+	if reborn := pool.GetTransport("http://b:80"); reborn == stale {
+		t.Error("被回收的池不应复用旧实例")
+	}
+	if keys := pool.Keys(); len(keys) != 2 {
+		t.Errorf("expected 2 pools after re-create, got %v", keys)
+	}
+}
+
+// TestTransportPool_ReconcileWithEmptyActive 所有上游都下线时回收全部池
+func TestTransportPool_ReconcileWithEmptyActive(t *testing.T) {
+	pool := NewTransportPool()
+	pool.GetTransport("http://a:80")
+	pool.GetTransport("http://b:80")
+
+	if released := pool.Reconcile(nil); released != 2 {
+		t.Fatalf("expected 2 released, got %d", released)
+	}
+	if keys := pool.Keys(); len(keys) != 0 {
+		t.Errorf("expected empty pool, got %v", keys)
 	}
 }

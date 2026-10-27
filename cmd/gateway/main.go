@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httputil"
+	"net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
@@ -270,6 +271,13 @@ func startServer() error {
 	globalDispatcher.Store(initialSnapshot)
 	globalServer = newHTTPServer(cfg, globalDispatcher)
 
+	// 打印上游连接池参数与 fd 预算：这些值当前是代码常量，运维必须能对上号
+	fmt.Printf("✓ 上游连接池(按 scheme://host 共享): max_idle_conns=%d max_idle_conns_per_host=%d max_conns_per_host=%d idle_timeout=%s\n",
+		proxy.DefaultMaxIdleConns, proxy.DefaultMaxIdleConnsPerHost,
+		proxy.DefaultMaxConnsPerHost, proxy.DefaultIdleConnTimeout)
+	fmt.Printf("  fd 预算 ≈ 上游 host 数 × %d + 监听/管理面连接，请确保 nofile 足够（当前副本数不参与该公式）\n",
+		proxy.DefaultMaxConnsPerHost)
+
 	// 设置配置重载生命周期与快照热重载
 	setupReloadLifecycle(configManager, globalDispatcher)
 
@@ -348,7 +356,23 @@ func newAdminHandler(isReady func() bool) http.Handler {
 		}
 	})
 
+	// 性能剖析端点默认关闭：仅在 GATEWAY_PPROF=1 时挂载到管理端口（管理面本就只监听内网/回环），
+	// 避免生产环境无门槛暴露 goroutine/内存/CPU 信息。
+	if pprofEnabled() {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
+
 	return mux
+}
+
+// pprofEnabled 是否开启性能剖析端点（默认关闭）
+func pprofEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("GATEWAY_PPROF")))
+	return v == "1" || v == "true" || v == "yes"
 }
 
 // newAdminHTTPServer 根据配置构建独立的 Admin http.Server 实例 (REQ-P1-04)
@@ -805,6 +829,11 @@ func accessLogMiddlewareWithConfig(cfg *config.Config) gin.HandlerFunc {
 			if logger.Log == nil {
 				return
 			}
+			// zap 的级别过滤发生在字段求值之后，这里必须提前判断：
+			// 否则 log.level=warn/error 时每个请求仍会构造 ~10 个 zap.Field。
+			if !logger.Log.Core().Enabled(zap.InfoLevel) {
+				return
+			}
 
 			var logCfg *config.LogConfig
 			if cfg != nil {
@@ -825,6 +854,28 @@ func accessLogMiddlewareWithConfig(cfg *config.Config) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// bodyStatsNeeded 判断当前配置与日志级别下是否需要采集请求/响应 body 统计。
+//
+// 只有 access log（info 级别且未关闭）和 debug 日志会消费 body_bytes/body_sha256
+// 等字段；两者都不输出时包装请求体纯属浪费——实测 log.level=warn/error 的默认
+// 生产配置下，每个请求都会额外做一次 bodyObserver 包装与加锁计数。
+func bodyStatsNeeded(cfg *config.Config) bool {
+	if logger.Log == nil {
+		return false
+	}
+	logCore := logger.Log.Core()
+	if logCore.Enabled(zap.DebugLevel) {
+		return true
+	}
+	if !logCore.Enabled(zap.InfoLevel) {
+		return false
+	}
+	if cfg == nil {
+		return true
+	}
+	return cfg.Log.IsAccessLogEnabled()
 }
 
 // getErrorKind 根据响应状态码推断错误类型
@@ -1033,8 +1084,12 @@ func registerRoutesWithConfigPluginsAndRouter(r *gin.Engine, cfg *config.Config,
 			}
 		}
 
+		// body 统计只在"真的会被输出"时采集：access log（info 级别且开启）与 debug 日志
+		// 才消费这些字段，否则每请求白白付出包装 + 加锁 + 计数的成本。
+		needBodyStats := bodyStatsNeeded(cfg)
+
 		var reqObserver *bodyObserver
-		if c.Request.Body != nil && c.Request.Body != http.NoBody {
+		if needBodyStats && c.Request.Body != nil && c.Request.Body != http.NoBody {
 			reqObserver = newBodyObserver(c.Request.Body, bodyLimit, enableSHA)
 			c.Request.Body = reqObserver
 		}
@@ -1203,10 +1258,12 @@ func registerRoutesWithConfigPluginsAndRouter(r *gin.Engine, cfg *config.Config,
 		// 创建反向代理
 		proxyHandler := httputil.NewSingleHostReverseProxy(target)
 
-		// 3. 设置专属 Transport 连接池与幂等重试 Transport
-		transportKey := matchedRoute.Name
+		// 3. 设置上游 Transport 连接池与幂等重试 Transport
+		// 池按上游 scheme://host 共享：同一上游的多条路由复用连接，
+		// 路由改名/删除也不会遗留孤儿池（由快照切换后的 Reconcile 回收）。
+		transportKey := proxy.PoolKey(target)
 		if transportKey == "" {
-			transportKey = target.Host
+			transportKey = matchedRoute.Name
 		}
 		baseTransport := globalTransportPool.GetTransport(transportKey)
 		proxyHandler.Transport = &proxy.RetryTransport{
@@ -1274,7 +1331,7 @@ func registerRoutesWithConfigPluginsAndRouter(r *gin.Engine, cfg *config.Config,
 			if resp.Header.Get("X-Request-ID") == "" {
 				resp.Header.Set("X-Request-ID", reqID)
 			}
-			if resp.Body != nil {
+			if needBodyStats && resp.Body != nil {
 				respObserver = newBodyObserver(resp.Body, bodyLimit, enableSHA)
 				resp.Body = respObserver
 			}
@@ -1358,19 +1415,21 @@ func registerRoutesWithConfigPluginsAndRouter(r *gin.Engine, cfg *config.Config,
 			logger.Log.Debug("返回给用户", userFields...)
 		}
 
-		// 存储报文观测统计值至上下文供外层访问日志读取
-		c.Set("body_bytes", payloadBytes)
-		c.Set("body_sha256", payloadSHA)
-		c.Set("req_body_bytes", reqBytes)
-		c.Set("req_body_sha256", reqSHA)
-		c.Set("resp_body_bytes", respBytes)
-		c.Set("resp_body_sha256", respSHA)
-		if bodyLimit > 0 {
-			if len(reqSample) > 0 {
-				c.Set("sample_req_body", string(reqSample))
-			}
-			if len(respSample) > 0 {
-				c.Set("sample_resp_body", string(respSample))
+		// 存储报文观测统计值至上下文供外层访问日志读取（未被消费时不必写 6 个 context key）
+		if needBodyStats {
+			c.Set("body_bytes", payloadBytes)
+			c.Set("body_sha256", payloadSHA)
+			c.Set("req_body_bytes", reqBytes)
+			c.Set("req_body_sha256", reqSHA)
+			c.Set("resp_body_bytes", respBytes)
+			c.Set("resp_body_sha256", respSHA)
+			if bodyLimit > 0 {
+				if len(reqSample) > 0 {
+					c.Set("sample_req_body", string(reqSample))
+				}
+				if len(respSample) > 0 {
+					c.Set("sample_resp_body", string(respSample))
+				}
 			}
 		}
 	})

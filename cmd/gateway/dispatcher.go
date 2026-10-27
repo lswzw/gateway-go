@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"gateway-go/internal/config"
 	"gateway-go/internal/logger"
 	"gateway-go/internal/plugin"
+	"gateway-go/internal/proxy"
 	"gateway-go/internal/router"
 
 	"github.com/gin-gonic/gin"
@@ -191,6 +194,30 @@ func logReloadEvent(version string, duration time.Duration, success bool, err er
 	}
 }
 
+// upstreamPoolKeys 计算配置中仍然存在的上游连接池键（scheme://host）。
+// internal:// 内部响应路由不产生上游连接，直接跳过。
+func upstreamPoolKeys(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+
+	keys := make([]string, 0, len(cfg.Routes))
+	for i := range cfg.Routes {
+		targetURL := strings.TrimSpace(cfg.Routes[i].Target.URL)
+		if targetURL == "" || strings.HasPrefix(targetURL, "internal://") {
+			continue
+		}
+		u, err := url.Parse(targetURL)
+		if err != nil {
+			continue
+		}
+		if key := proxy.PoolKey(u); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
 // buildSnapshotForConfig 根据给定配置构建独立的路由快照与插件环境 (REQ-P1-02)
 func buildSnapshotForConfig(newCfg *config.Config, nextVersion string) (*Snapshot, error) {
 	// 1. 创建隔离的插件管理器并注册所有标准插件
@@ -278,6 +305,22 @@ func setupReloadLifecycle(cm *config.ConfigManager, dispatcher *Dispatcher) {
 					time.Sleep(getSnapshotGracePeriod())
 					old.Release()
 				}(oldSnap)
+			}
+
+			// 延迟回收不再被任何路由引用的上游连接池。
+			// 必须等旧快照宽限期结束：否则旧快照的在途请求会立刻把刚删掉的池重建出来。
+			if newCfg != nil {
+				activeKeys := upstreamPoolKeys(newCfg)
+				go func(keys []string) {
+					time.Sleep(getSnapshotGracePeriod())
+					released := globalTransportPool.Reconcile(keys)
+					if released > 0 && logger.Log != nil {
+						logger.Log.Info("回收未使用的上游连接池",
+							zap.Int("released", released),
+							zap.Strings("active_pools", keys),
+						)
+					}
+				}(activeKeys)
 			}
 			return nil
 		},
