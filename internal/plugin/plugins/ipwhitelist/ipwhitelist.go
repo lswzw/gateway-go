@@ -3,8 +3,10 @@ package ipwhitelist
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 
+	"gateway-go/internal/netutil"
 	"gateway-go/internal/plugin/core"
 
 	"github.com/gin-gonic/gin"
@@ -15,7 +17,8 @@ type IPWhitelistPlugin struct {
 	*core.BasePlugin
 	config map[string]interface{}
 	// IP 白名单
-	ipWhitelist sync.Map
+	ipWhitelist    sync.Map
+	trustedProxies []string
 }
 
 // New 创建 IP 白名单插件
@@ -44,13 +47,29 @@ func (p *IPWhitelistPlugin) Init(config interface{}) error {
 		}
 	}
 
+	// 初始化可信代理
+	p.trustedProxies = nil
+	if tp, ok := configMap["trusted_proxies"].([]interface{}); ok {
+		for _, item := range tp {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				p.trustedProxies = append(p.trustedProxies, strings.TrimSpace(s))
+			}
+		}
+	} else if tpStr, ok := configMap["trusted_proxies"].([]string); ok {
+		p.trustedProxies = append(p.trustedProxies, tpStr...)
+	}
+
 	return nil
 }
 
 // Execute 执行插件
 func (p *IPWhitelistPlugin) Execute(ctx *gin.Context) error {
 	// 获取客户端 IP
-	clientIP := ctx.ClientIP()
+	trusted := p.trustedProxies
+	if len(trusted) == 0 {
+		trusted = netutil.GetDefaultTrustedProxies()
+	}
+	clientIP := netutil.ClientIP(ctx, trusted)
 
 	// 检查 IP 是否在白名单中
 	if !p.isIPAllowed(clientIP) {

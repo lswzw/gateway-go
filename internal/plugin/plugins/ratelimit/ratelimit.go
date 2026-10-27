@@ -2,10 +2,13 @@ package ratelimit
 
 import (
 	"fmt"
-	"gateway-go/internal/plugin/core"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"gateway-go/internal/netutil"
+	"gateway-go/internal/plugin/core"
 
 	"github.com/gin-gonic/gin"
 )
@@ -22,11 +25,12 @@ type TokenBucket struct {
 // RateLimitPlugin 限流插件
 type RateLimitPlugin struct {
 	*core.BasePlugin
-	config   map[string]interface{}
-	buckets  map[string]*TokenBucket
-	mu       sync.RWMutex
-	cleanup  *time.Ticker
-	stopChan chan struct{}
+	config         map[string]interface{}
+	buckets        map[string]*TokenBucket
+	mu             sync.RWMutex
+	cleanup        *time.Ticker
+	stopChan       chan struct{}
+	trustedProxies []string
 }
 
 // New 创建限流插件
@@ -48,6 +52,18 @@ func (p *RateLimitPlugin) Init(config interface{}) error {
 	}
 
 	p.config = configMap
+
+	// 初始化可信代理
+	p.trustedProxies = nil
+	if tp, ok := configMap["trusted_proxies"].([]interface{}); ok {
+		for _, item := range tp {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				p.trustedProxies = append(p.trustedProxies, strings.TrimSpace(s))
+			}
+		}
+	} else if tpStr, ok := configMap["trusted_proxies"].([]string); ok {
+		p.trustedProxies = append(p.trustedProxies, tpStr...)
+	}
 
 	// 启动清理协程
 	go p.cleanupLoop()
@@ -79,7 +95,11 @@ func (p *RateLimitPlugin) Execute(ctx *gin.Context) error {
 func (p *RateLimitPlugin) getLimitKey(c *gin.Context) string {
 	// 如果配置了基于IP限流，则使用IP作为键
 	if ipBased, ok := p.config["ip_based"].(bool); ok && ipBased {
-		return c.ClientIP()
+		trusted := p.trustedProxies
+		if len(trusted) == 0 {
+			trusted = netutil.GetDefaultTrustedProxies()
+		}
+		return netutil.ClientIP(c, trusted)
 	}
 
 	// 默认使用路径作为限流键
