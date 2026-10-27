@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"net/http"
@@ -516,7 +519,8 @@ func buildEngine() *gin.Engine {
 func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 	r := gin.New()
 
-	// 使用统一错误输出的恢复中间件
+	// 注册链路最外层中间件：Access Log 与统一错误输出的 customRecovery
+	r.Use(accessLogMiddleware())
 	r.Use(customRecovery())
 
 	var trustedProxies []string
@@ -546,6 +550,192 @@ func reloadRoutes() {
 	globalServer.Handler = globalEngine
 
 	fmt.Println("✓ 路由已重新加载")
+}
+
+// accessLogMiddleware 构建链路最外层的独立访问日志中间件 (REQ-P0-05)
+func accessLogMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		startTime := time.Now()
+
+		defer func() {
+			if logger.Log == nil {
+				return
+			}
+
+			var logCfg *config.LogConfig
+			if configManager != nil {
+				if cfg := configManager.GetConfig(); cfg != nil {
+					logCfg = &cfg.Log
+				}
+			}
+
+			if logCfg != nil && !logCfg.IsAccessLogEnabled() {
+				return
+			}
+
+			fields := buildAccessFields(c, logCfg, startTime)
+			logger.Log.Info("access", fields...)
+		}()
+
+		c.Next()
+	}
+}
+
+// getErrorKind 根据响应状态码推断错误类型
+func getErrorKind(c *gin.Context, status int) string {
+	if ek := c.GetString("error_kind"); ek != "" {
+		return ek
+	}
+	switch {
+	case status == http.StatusBadGateway:
+		return "bad_gateway"
+	case status == http.StatusGatewayTimeout:
+		return "timeout"
+	case status == http.StatusNotFound:
+		return "not_found"
+	case status >= 500:
+		return "upstream_error"
+	default:
+		return "-"
+	}
+}
+
+// buildAccessFields 构造 access log 字段列表并支持 access_fields 白名单过滤
+func buildAccessFields(c *gin.Context, cfg *config.LogConfig, startTime time.Time) []zap.Field {
+	cost := time.Since(startTime)
+	rtMs := cost.Milliseconds()
+
+	statusCode := c.Writer.Status()
+	if statusCode <= 0 {
+		statusCode = http.StatusOK
+	}
+
+	bytesWritten := int64(c.Writer.Size())
+	if bytesWritten < 0 {
+		bytesWritten = 0
+	}
+
+	upstream := c.GetString("target")
+	if upstream == "" {
+		upstream = "-"
+	}
+
+	reqID := c.GetHeader("X-Request-ID")
+	if reqID == "" {
+		reqID = c.GetHeader("x-request-id")
+	}
+	if reqID == "" {
+		reqID = c.GetString("request_id")
+	}
+	if reqID == "" {
+		reqID = "-"
+	}
+
+	clientIP := c.ClientIP()
+	if clientIP == "" {
+		clientIP = "-"
+	}
+
+	errorKind := getErrorKind(c, statusCode)
+	method := c.Request.Method
+	path := c.Request.URL.Path
+
+	var accessFieldsConfig []string
+	if cfg != nil {
+		accessFieldsConfig = cfg.AccessFields
+	}
+
+	// 构造字段映射表供白名单过滤使用
+	fieldMap := map[string]zap.Field{
+		"status":     zap.Int("status", statusCode),
+		"bytes":      zap.Int64("bytes", bytesWritten),
+		"upstream":   zap.String("upstream", upstream),
+		"target":     zap.String("target", upstream),
+		"rt_ms":      zap.Int64("rt_ms", rtMs),
+		"request_id": zap.String("request_id", reqID),
+		"client_ip":  zap.String("client_ip", clientIP),
+		"error_kind": zap.String("error_kind", errorKind),
+		"method":     zap.String("method", method),
+		"path":       zap.String("path", path),
+		"cost":       zap.Duration("cost", cost),
+	}
+
+	if v, ok := c.Get("body_bytes"); ok {
+		fieldMap["body_bytes"] = zap.Int64("body_bytes", v.(int64))
+	}
+	if v, ok := c.Get("body_sha256"); ok && v.(string) != "" {
+		fieldMap["body_sha256"] = zap.String("body_sha256", v.(string))
+	}
+	if v, ok := c.Get("req_body_bytes"); ok {
+		fieldMap["req_body_bytes"] = zap.Int64("req_body_bytes", v.(int64))
+	}
+	if v, ok := c.Get("req_body_sha256"); ok && v.(string) != "" {
+		fieldMap["req_body_sha256"] = zap.String("req_body_sha256", v.(string))
+	}
+	if v, ok := c.Get("resp_body_bytes"); ok {
+		fieldMap["resp_body_bytes"] = zap.Int64("resp_body_bytes", v.(int64))
+	}
+	if v, ok := c.Get("resp_body_sha256"); ok && v.(string) != "" {
+		fieldMap["resp_body_sha256"] = zap.String("resp_body_sha256", v.(string))
+	}
+	if v, ok := c.Get("sample_req_body"); ok {
+		fieldMap["body"] = zap.String("body", v.(string))
+	}
+	if v, ok := c.Get("sample_resp_body"); ok {
+		fieldMap["resp_body"] = zap.String("resp_body", v.(string))
+	}
+
+	// 如果配置了 AccessFields 白名单，则仅输出指定的字段
+	if len(accessFieldsConfig) > 0 {
+		var fields []zap.Field
+		for _, name := range accessFieldsConfig {
+			if f, exists := fieldMap[name]; exists {
+				fields = append(fields, f)
+			}
+		}
+		return fields
+	}
+
+	// 默认输出标准字段 (status, bytes, upstream, rt_ms, request_id, client_ip, error_kind, method, path)
+	fields := []zap.Field{
+		zap.Int("status", statusCode),
+		zap.Int64("bytes", bytesWritten),
+		zap.String("upstream", upstream),
+		zap.Int64("rt_ms", rtMs),
+		zap.String("request_id", reqID),
+		zap.String("client_ip", clientIP),
+		zap.String("error_kind", errorKind),
+		zap.String("method", method),
+		zap.String("path", path),
+	}
+
+	// 报文流式观测扩展字段（若存在则附加）
+	if f, exists := fieldMap["body_bytes"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["body_sha256"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["req_body_bytes"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["req_body_sha256"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["resp_body_bytes"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["resp_body_sha256"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["body"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["resp_body"]; exists {
+		fields = append(fields, f)
+	}
+
+	return fields
 }
 
 // registerConfigRoutes 注册配置管理路由
@@ -580,25 +770,30 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 
 	// 创建路由处理中间件
 	r.Use(func(c *gin.Context) {
+		startTime := time.Now()
+
+		bodyLimit := 0
+		enableSHA := true
+		if configManager != nil {
+			if cfg := configManager.GetConfig(); cfg != nil {
+				bodyLimit = cfg.Log.BodyLimit
+				enableSHA = cfg.Log.IsBodySHA256Enabled()
+			}
+		}
+
+		var reqObserver *bodyObserver
+		if c.Request.Body != nil && c.Request.Body != http.NoBody {
+			reqObserver = newBodyObserver(c.Request.Body, bodyLimit, enableSHA)
+			c.Request.Body = reqObserver
+		}
+
 		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
 			req := c.Request
 			headers := make(map[string][]string)
 			for k, v := range req.Header {
 				headers[k] = v
 			}
-			// 读取body内容（最多4KB）
-			var bodyStr string
-			if req.Body != nil {
-				bodyBytes, _ := io.ReadAll(io.LimitReader(req.Body, 4096))
-				bodyStr = string(bodyBytes)
-				// 还原body供后续处理
-				req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			}
-			startTime := time.Now()
-			// 捕获响应体
-			blw := &bodyLogWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
-			c.Writer = blw
-			// 1. 收到请求
+			// 1. 收到请求 (注意: 不再读取或回写 req.Body，避免 4KB 截断)
 			logger.Log.Debug("收到请求",
 				zap.String("method", req.Method),
 				zap.String("path", req.URL.Path),
@@ -606,10 +801,8 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 				zap.Any("standard_headers", headers),
 				zap.String("client_ip", netutil.ClientIP(c, cfg.Server.TrustedProxies)),
 				zap.Time("start_time", startTime),
-				zap.String("body", bodyStr),
 			)
 			c.Set("_debug_start_time", startTime)
-			c.Set("_debug_req_body", bodyStr)
 			c.Set("_debug_headers", headers)
 		}
 
@@ -755,52 +948,106 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 			}
 			respondError(c, http.StatusBadGateway, fmt.Sprintf("代理请求失败: %v", err), reqID)
 		}
-		// 捕获后端响应体
+		// 观察后端响应体 (流式旁路观察，禁止截断或回写)
+		var respObserver *bodyObserver
+		var respStatusCode int
 		proxy.ModifyResponse = func(resp *http.Response) error {
-			if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
-				respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-				logger.Log.Debug("收到后端响应",
-					zap.String("target_url", matchedRoute.Target.URL),
-					zap.Int("status", resp.StatusCode),
-					zap.String("resp_body", string(respBody)),
-				)
-				resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
+			respStatusCode = resp.StatusCode
+			if resp.Body != nil {
+				respObserver = newBodyObserver(resp.Body, bodyLimit, enableSHA)
+				resp.Body = respObserver
 			}
 			return nil
 		}
 		// 执行代理请求
 		proxy.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
-		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
-			startTime, _ := c.Get("_debug_start_time")
-			cost := time.Since(startTime.(time.Time))
-			logger.Log.Debug("返回给用户",
-				zap.String("method", c.Request.Method),
-				zap.String("path", c.Request.URL.Path),
-				zap.Duration("cost", cost),
-			)
+
+		cost := time.Since(startTime)
+
+		var reqBytes int64
+		var reqSHA string
+		var reqSample []byte
+		if reqObserver != nil {
+			reqBytes = reqObserver.BytesCount()
+			reqSHA = reqObserver.SHA256Hex()
+			reqSample = reqObserver.Sample()
 		}
 
-		// access log: info 级别下简洁日志
-		if logger.Log != nil && logger.Log.Core().Enabled(zap.InfoLevel) && !logger.Log.Core().Enabled(zap.DebugLevel) {
-			startTime := time.Now()
-			blw := &bodyLogWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
-			c.Writer = blw
-			c.Next()
-			cost := time.Since(startTime)
-			statusCode := c.Writer.Status()
-			target := "-"
-			if v, ok := c.Get("target"); ok {
-				target, _ = v.(string)
+		var respBytes int64
+		var respSHA string
+		var respSample []byte
+		if respObserver != nil {
+			respBytes = respObserver.BytesCount()
+			respSHA = respObserver.SHA256Hex()
+			respSample = respObserver.Sample()
+		}
+
+		// 主报文统计信息
+		payloadBytes := reqBytes
+		payloadSHA := reqSHA
+		if payloadBytes == 0 && respBytes > 0 {
+			payloadBytes = respBytes
+			payloadSHA = respSHA
+		}
+
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
+			// 收到后端响应日志
+			respFields := []zap.Field{
+				zap.String("target_url", matchedRoute.Target.URL),
+				zap.Int("status", respStatusCode),
+				zap.Int64("body_bytes", respBytes),
+				zap.String("body_sha256", respSHA),
+				zap.Int64("resp_body_bytes", respBytes),
+				zap.String("resp_body_sha256", respSHA),
 			}
-			logger.Log.Info("access",
+			if bodyLimit > 0 && len(respSample) > 0 {
+				respFields = append(respFields, zap.String("resp_body", string(respSample)))
+			}
+			logger.Log.Debug("收到后端响应", respFields...)
+
+			// 请求体转发完成日志 (如果有请求体)
+			if reqBytes > 0 {
+				reqFields := []zap.Field{
+					zap.String("target_url", matchedRoute.Target.URL),
+					zap.Int64("body_bytes", reqBytes),
+					zap.String("body_sha256", reqSHA),
+					zap.Int64("req_body_bytes", reqBytes),
+					zap.String("req_body_sha256", reqSHA),
+				}
+				if bodyLimit > 0 && len(reqSample) > 0 {
+					reqFields = append(reqFields, zap.String("body", string(reqSample)))
+				}
+				logger.Log.Debug("请求转发完成", reqFields...)
+			}
+
+			// 返回给用户
+			userFields := []zap.Field{
 				zap.String("method", c.Request.Method),
 				zap.String("path", c.Request.URL.Path),
-				zap.Int("status", statusCode),
 				zap.Duration("cost", cost),
 				zap.String("client_ip", netutil.ClientIP(c, cfg.Server.TrustedProxies)),
 				zap.String("target", target),
-			)
+				zap.Int64("body_bytes", payloadBytes),
+				zap.String("body_sha256", payloadSHA),
+			}
+			logger.Log.Debug("返回给用户", userFields...)
+		}
+
+		// 存储报文观测统计值至上下文供外层访问日志读取
+		c.Set("body_bytes", payloadBytes)
+		c.Set("body_sha256", payloadSHA)
+		c.Set("req_body_bytes", reqBytes)
+		c.Set("req_body_sha256", reqSHA)
+		c.Set("resp_body_bytes", respBytes)
+		c.Set("resp_body_sha256", respSHA)
+		if bodyLimit > 0 {
+			if len(reqSample) > 0 {
+				c.Set("sample_req_body", string(reqSample))
+			}
+			if len(respSample) > 0 {
+				c.Set("sample_resp_body", string(respSample))
+			}
 		}
 	})
 
@@ -889,14 +1136,89 @@ func readPIDFile(path string) (int, error) {
 	return pid, err
 }
 
-// 在文件末尾添加 bodyLogWriter 定义
-
-type bodyLogWriter struct {
-	gin.ResponseWriter
-	body *bytes.Buffer
+// bodyObserver 是一个非侵入的流式 ReadCloser 包装器，
+// 用于在不截断、不整体缓冲进内存的前提下计算传输字节数、SHA-256 及采样前 body_limit 字节。
+type bodyObserver struct {
+	rc         io.ReadCloser
+	hasher     hash.Hash
+	limit      int
+	sampleBuf  bytes.Buffer
+	bytesCount int64
+	closed     bool
+	mu         sync.Mutex
 }
 
-func (w *bodyLogWriter) Write(b []byte) (int, error) {
-	w.body.Write(b)
-	return w.ResponseWriter.Write(b)
+func newBodyObserver(rc io.ReadCloser, limit int, enableSHA bool) *bodyObserver {
+	var h hash.Hash
+	if enableSHA {
+		h = sha256.New()
+	}
+	return &bodyObserver{
+		rc:     rc,
+		hasher: h,
+		limit:  limit,
+	}
+}
+
+func (b *bodyObserver) Read(p []byte) (int, error) {
+	if b.rc == nil {
+		return 0, io.EOF
+	}
+	n, err := b.rc.Read(p)
+	if n > 0 {
+		b.mu.Lock()
+		b.bytesCount += int64(n)
+		if b.hasher != nil {
+			b.hasher.Write(p[:n])
+		}
+		if b.limit > 0 && b.sampleBuf.Len() < b.limit {
+			toWrite := n
+			remaining := b.limit - b.sampleBuf.Len()
+			if toWrite > remaining {
+				toWrite = remaining
+			}
+			b.sampleBuf.Write(p[:toWrite])
+		}
+		b.mu.Unlock()
+	}
+	return n, err
+}
+
+func (b *bodyObserver) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	if b.rc != nil {
+		return b.rc.Close()
+	}
+	return nil
+}
+
+func (b *bodyObserver) BytesCount() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.bytesCount
+}
+
+func (b *bodyObserver) SHA256Hex() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.hasher == nil || b.bytesCount == 0 {
+		return ""
+	}
+	sum := b.hasher.Sum(nil)
+	full := hex.EncodeToString(sum)
+	if len(full) >= 8 {
+		return full[:8]
+	}
+	return full
+}
+
+func (b *bodyObserver) Sample() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sampleBuf.Bytes()
 }

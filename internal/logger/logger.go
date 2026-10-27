@@ -52,12 +52,6 @@ func Init(config *config.LogConfig) error {
 	if config.Format == "text" {
 		encoder = zapcore.NewConsoleEncoder(encoderConfig)
 	} else {
-		// info 级别精简日志：去掉 level、caller、msg 字段
-		if config.Level == "info" {
-			encoderConfig.LevelKey = ""
-			encoderConfig.CallerKey = ""
-			encoderConfig.MessageKey = ""
-		}
 		encoder = zapcore.NewJSONEncoder(encoderConfig)
 	}
 
