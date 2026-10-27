@@ -218,6 +218,13 @@ func (m *Manager) loadConfigFromManager() error {
 	}
 
 	m.config = routerConfig
+
+	// 构建 Trie 路由树并初始化路由缓存
+	m.trieRouter = NewTrieRouter()
+	for i := range routerConfig.Routes {
+		m.trieRouter.Insert(routerConfig.Routes[i].Match.Path, &routerConfig.Routes[i])
+	}
+	m.routeCache = NewRouteCache(1024)
 	return nil
 }
 
@@ -264,6 +271,13 @@ func (m *Manager) loadConfigFromCenter() error {
 	}
 
 	m.config = routerConfig
+
+	// 构建 Trie 路由树并初始化路由缓存
+	m.trieRouter = NewTrieRouter()
+	for i := range routerConfig.Routes {
+		m.trieRouter.Insert(routerConfig.Routes[i].Match.Path, &routerConfig.Routes[i])
+	}
+	m.routeCache = NewRouteCache(1024)
 	return nil
 }
 

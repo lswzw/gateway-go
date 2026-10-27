@@ -156,6 +156,10 @@ func (m *Manager) StopAll() error {
 				}
 			}
 		}
+
+		if m.pluginCache != nil {
+			m.pluginCache.Stop()
+		}
 	})
 	if len(errs) > 0 {
 		return fmt.Errorf("停止插件时发生错误: %v", errs)

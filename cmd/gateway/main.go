@@ -236,22 +236,30 @@ func startServer() error {
 	// 初始化路由管理器
 	routerManager = router.NewManagerFromConfig(configManager, pluginManager)
 
-	// 添加配置重载钩子
+	// 构建HTTP服务器与初始快照 (REQ-P1-02 前半)
+	globalEngine = buildEngine()
+	initialSnapshot := &Snapshot{
+		Version:   configManager.GetVersion(),
+		Config:    cfg,
+		Engine:    globalEngine,
+		CreatedAt: time.Now(),
+		cleanup: func() {
+			if pluginManager != nil {
+				_ = pluginManager.StopAll()
+			}
+		},
+	}
+	globalDispatcher.Store(initialSnapshot)
+	globalServer = newHTTPServer(cfg, globalDispatcher)
+
+	// 设置配置重载生命周期与快照热重载
+	setupReloadLifecycle(configManager, globalDispatcher)
+
+	// 添加配置重载钩子 (同步 routerManager)
 	configManager.AddReloadHook(func(cfg *config.Config) error {
-		fmt.Println("正在重新加载路由配置...")
-		if err := routerManager.ReloadFromConfig(configManager, pluginManager); err != nil {
-			return err
+		if routerManager != nil {
+			return routerManager.ReloadFromConfig(configManager, pluginManager)
 		}
-		// 重新加载可用插件
-		if err := loadAvailablePlugins(cfg); err != nil {
-			return err
-		}
-		// 重新加载路由插件
-		if err := loadRoutePlugins(cfg); err != nil {
-			return err
-		}
-		// 重新注册路由
-		reloadRoutes()
 		return nil
 	})
 
@@ -265,10 +273,6 @@ func startServer() error {
 
 	// 处理系统信号
 	configManager.HandleSignals()
-
-	// 构建HTTP服务器
-	globalEngine = buildEngine()
-	globalServer = newHTTPServer(cfg, globalEngine)
 
 	// 写入PID文件
 	pidPath := getPIDFilePath(cfg)
@@ -418,44 +422,44 @@ func runServer(ctx context.Context, srv *http.Server, cfg *config.Config, pm *pl
 	}
 }
 
-// registerPlugins 注册所有插件
-func registerPlugins() {
-	// 注册限流插件
-	if err := pluginManager.Register(ratelimit.New()); err != nil {
-		log.Printf("注册限流插件失败: %v", err)
+// registerPluginsTo 向指定插件管理器注册所有内置插件
+func registerPluginsTo(pm *plugin.Manager) error {
+	if pm == nil {
+		return nil
 	}
-
-	// 注册熔断器插件
-	if err := pluginManager.Register(circuitbreaker.New()); err != nil {
-		log.Printf("注册熔断器插件失败: %v", err)
+	if err := pm.Register(ratelimit.New()); err != nil {
+		return fmt.Errorf("注册限流插件失败: %w", err)
 	}
-
-	// 注册跨域插件
-	if err := pluginManager.Register(cors.New()); err != nil {
-		log.Printf("注册跨域插件失败: %v", err)
+	if err := pm.Register(circuitbreaker.New()); err != nil {
+		return fmt.Errorf("注册熔断器插件失败: %w", err)
 	}
-
-	// 注册IP白名单插件
-	if err := pluginManager.Register(ipwhitelist.New()); err != nil {
-		log.Printf("注册IP白名单插件失败: %v", err)
+	if err := pm.Register(cors.New()); err != nil {
+		return fmt.Errorf("注册跨域插件失败: %w", err)
 	}
-
-	// 注册一致性校验插件
-	if err := pluginManager.Register(consistency.New()); err != nil {
-		log.Printf("注册一致性校验插件失败: %v", err)
+	if err := pm.Register(ipwhitelist.New()); err != nil {
+		return fmt.Errorf("注册IP白名单插件失败: %w", err)
 	}
-
-	// 注册外部接口认证插件
-	if err := pluginManager.Register(interface_auth.New()); err != nil {
-		log.Printf("注册外部接口认证插件失败: %v", err)
+	if err := pm.Register(consistency.New()); err != nil {
+		return fmt.Errorf("注册一致性校验插件失败: %w", err)
 	}
-
-	fmt.Println("✓ 所有插件已注册")
+	if err := pm.Register(interface_auth.New()); err != nil {
+		return fmt.Errorf("注册外部接口认证插件失败: %w", err)
+	}
+	return nil
 }
 
-// loadAvailablePlugins 加载可用插件配置
-func loadAvailablePlugins(cfg *config.Config) error {
-	if cfg.Plugins.Available == nil {
+// registerPlugins 注册所有插件到全局插件管理器
+func registerPlugins() {
+	if err := registerPluginsTo(pluginManager); err != nil {
+		log.Printf("注册插件失败: %v", err)
+	} else {
+		fmt.Println("✓ 所有插件已注册")
+	}
+}
+
+// loadAvailablePluginsTo 加载可用插件配置到指定插件管理器
+func loadAvailablePluginsTo(pm *plugin.Manager, cfg *config.Config) error {
+	if cfg == nil || cfg.Plugins.Available == nil || pm == nil {
 		return nil
 	}
 
@@ -471,22 +475,49 @@ func loadAvailablePlugins(cfg *config.Config) error {
 	}
 
 	// 加载可用插件
-	if err := pluginManager.LoadAvailablePlugins(pluginConfigs); err != nil {
-		return fmt.Errorf("加载可用插件失败: %v", err)
+	if err := pm.LoadAvailablePlugins(pluginConfigs); err != nil {
+		return fmt.Errorf("加载可用插件失败: %w", err)
 	}
 
-	fmt.Printf("✓ 已加载 %d 个可用插件\n", len(pluginConfigs))
+	return nil
+}
+
+// loadAvailablePlugins 加载可用插件配置
+func loadAvailablePlugins(cfg *config.Config) error {
+	if err := loadAvailablePluginsTo(pluginManager, cfg); err != nil {
+		return err
+	}
+	if cfg != nil && cfg.Plugins.Available != nil {
+		fmt.Printf("✓ 已加载 %d 个可用插件\n", len(cfg.Plugins.Available))
+	}
+	return nil
+}
+
+// loadRoutePluginsTo 加载路由插件到指定插件管理器
+func loadRoutePluginsTo(pm *plugin.Manager, cfg *config.Config) error {
+	if cfg == nil || pm == nil {
+		return nil
+	}
+	for _, route := range cfg.Routes {
+		if len(route.Plugins) > 0 {
+			if err := pm.LoadRoutePlugins(route.Name, route.Plugins); err != nil {
+				return fmt.Errorf("加载路由 %s 的插件失败: %w", route.Name, err)
+			}
+		}
+	}
 	return nil
 }
 
 // loadRoutePlugins 加载路由插件
 func loadRoutePlugins(cfg *config.Config) error {
-	for _, route := range cfg.Routes {
-		if len(route.Plugins) > 0 {
-			if err := pluginManager.LoadRoutePlugins(route.Name, route.Plugins); err != nil {
-				return fmt.Errorf("加载路由 %s 的插件失败: %v", route.Name, err)
+	if err := loadRoutePluginsTo(pluginManager, cfg); err != nil {
+		return err
+	}
+	if cfg != nil {
+		for _, route := range cfg.Routes {
+			if len(route.Plugins) > 0 {
+				fmt.Printf("✓ 路由 %s 已加载插件: %v\n", route.Name, route.Plugins)
 			}
-			fmt.Printf("✓ 路由 %s 已加载插件: %v\n", route.Name, route.Plugins)
 		}
 	}
 	return nil
@@ -517,10 +548,15 @@ func buildEngine() *gin.Engine {
 
 // buildEngineWithConfig 使用给定配置构建gin引擎
 func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
+	return buildEngineWithConfigAndPlugins(cfg, pluginManager)
+}
+
+// buildEngineWithConfigAndPlugins 使用给定配置和插件管理器构建gin引擎 (REQ-P1-02)
+func buildEngineWithConfigAndPlugins(cfg *config.Config, pm *plugin.Manager) *gin.Engine {
 	r := gin.New()
 
 	// 注册链路最外层中间件：Access Log 与统一错误输出的 customRecovery
-	r.Use(accessLogMiddleware())
+	r.Use(accessLogMiddlewareWithConfig(cfg))
 	r.Use(customRecovery())
 
 	var trustedProxies []string
@@ -537,23 +573,28 @@ func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 	netutil.SetDefaultTrustedProxies(trustedProxies)
 
 	registerConfigRoutes(r)
-	registerRoutesWithConfig(r, cfg)
+	registerRoutesWithConfigAndPlugins(r, cfg, pm)
 	return r
 }
 
-// reloadRoutes 重新加载路由
+// reloadRoutes 重新加载路由快照 (REQ-P1-02)
 func reloadRoutes() {
-	// 清除现有路由并重新构建
-	globalEngine = buildEngine()
-
-	// 更新服务器处理器
-	globalServer.Handler = globalEngine
-
+	if configManager != nil {
+		if err := configManager.ReloadConfig(); err != nil {
+			fmt.Printf("✗ 路由重新加载失败: %v\n", err)
+			return
+		}
+	}
 	fmt.Println("✓ 路由已重新加载")
 }
 
 // accessLogMiddleware 构建链路最外层的独立访问日志中间件 (REQ-P0-05)
 func accessLogMiddleware() gin.HandlerFunc {
+	return accessLogMiddlewareWithConfig(nil)
+}
+
+// accessLogMiddlewareWithConfig 绑定特定快照配置的独立访问日志中间件
+func accessLogMiddlewareWithConfig(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		startTime := time.Now()
 
@@ -563,9 +604,11 @@ func accessLogMiddleware() gin.HandlerFunc {
 			}
 
 			var logCfg *config.LogConfig
-			if configManager != nil {
-				if cfg := configManager.GetConfig(); cfg != nil {
-					logCfg = &cfg.Log
+			if cfg != nil {
+				logCfg = &cfg.Log
+			} else if configManager != nil {
+				if curCfg := configManager.GetConfig(); curCfg != nil {
+					logCfg = &curCfg.Log
 				}
 			}
 
@@ -757,6 +800,11 @@ func registerRoutes(r *gin.Engine) {
 
 // registerRoutesWithConfig 使用指定配置注册业务路由
 func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
+	registerRoutesWithConfigAndPlugins(r, cfg, pluginManager)
+}
+
+// registerRoutesWithConfigAndPlugins 使用指定配置及插件管理器注册业务路由 (REQ-P1-02)
+func registerRoutesWithConfigAndPlugins(r *gin.Engine, cfg *config.Config, pm *plugin.Manager) {
 	if cfg == nil {
 		return
 	}
@@ -768,16 +816,24 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 		return routes[i].Match.Priority > routes[j].Match.Priority
 	})
 
+	var trustedProxies []string
+	if cfg != nil {
+		trustedProxies = cfg.Server.TrustedProxies
+	}
+
 	// 创建路由处理中间件
 	r.Use(func(c *gin.Context) {
 		startTime := time.Now()
 
 		bodyLimit := 0
 		enableSHA := true
-		if configManager != nil {
-			if cfg := configManager.GetConfig(); cfg != nil {
-				bodyLimit = cfg.Log.BodyLimit
-				enableSHA = cfg.Log.IsBodySHA256Enabled()
+		if cfg != nil {
+			bodyLimit = cfg.Log.BodyLimit
+			enableSHA = cfg.Log.IsBodySHA256Enabled()
+		} else if configManager != nil {
+			if curCfg := configManager.GetConfig(); curCfg != nil {
+				bodyLimit = curCfg.Log.BodyLimit
+				enableSHA = curCfg.Log.IsBodySHA256Enabled()
 			}
 		}
 
@@ -799,7 +855,7 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 				zap.String("path", req.URL.Path),
 				zap.String("raw_query", req.URL.RawQuery),
 				zap.Any("standard_headers", headers),
-				zap.String("client_ip", netutil.ClientIP(c, cfg.Server.TrustedProxies)),
+				zap.String("client_ip", netutil.ClientIP(c, trustedProxies)),
 				zap.Time("start_time", startTime),
 			)
 			c.Set("_debug_start_time", startTime)
@@ -840,32 +896,38 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 		reqID := response.GetRequestID(c)
 
 		// 执行插件链
-		if err := pluginManager.Execute(c, matchedRoute.Name); err != nil {
-			failedPlugin, _ := c.Get("failed_plugin")
-			pluginName, _ := failedPlugin.(string)
-			if c.Writer.Written() {
+		activePM := pm
+		if activePM == nil {
+			activePM = pluginManager
+		}
+		if activePM != nil {
+			if err := activePM.Execute(c, matchedRoute.Name); err != nil {
+				failedPlugin, _ := c.Get("failed_plugin")
+				pluginName, _ := failedPlugin.(string)
+				if c.Writer.Written() {
+					if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
+						logger.Log.Warn("插件已写响应但返回错误(违反契约，忽略该错误)",
+							zap.String("route_name", matchedRoute.Name),
+							zap.String("plugin", pluginName),
+							zap.String("request_id", reqID),
+							zap.Error(err),
+						)
+					}
+					c.Abort()
+					return
+				}
+
 				if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
-					logger.Log.Warn("插件已写响应但返回错误(违反契约，忽略该错误)",
+					logger.Log.Warn("插件执行失败",
 						zap.String("route_name", matchedRoute.Name),
 						zap.String("plugin", pluginName),
 						zap.String("request_id", reqID),
 						zap.Error(err),
 					)
 				}
-				c.Abort()
+				respondError(c, 500, err.Error(), reqID)
 				return
 			}
-
-			if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
-				logger.Log.Warn("插件执行失败",
-					zap.String("route_name", matchedRoute.Name),
-					zap.String("plugin", pluginName),
-					zap.String("request_id", reqID),
-					zap.Error(err),
-				)
-			}
-			respondError(c, 500, err.Error(), reqID)
-			return
 		}
 
 		// 如果请求被中止或已写响应，直接返回

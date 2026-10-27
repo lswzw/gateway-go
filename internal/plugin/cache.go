@@ -20,20 +20,32 @@ type PluginResult struct {
 
 // PluginCache 插件结果缓存
 type PluginCache struct {
-	cache map[string]*PluginResult
-	mu    sync.RWMutex
-	ttl   time.Duration
+	cache    map[string]*PluginResult
+	mu       sync.RWMutex
+	ttl      time.Duration
+	stopChan chan struct{}
+	stopOnce sync.Once
 }
 
 // NewPluginCache 创建插件缓存
 func NewPluginCache(ttl time.Duration) *PluginCache {
 	pc := &PluginCache{
-		cache: make(map[string]*PluginResult),
-		ttl:   ttl,
+		cache:    make(map[string]*PluginResult),
+		ttl:      ttl,
+		stopChan: make(chan struct{}),
 	}
 	// 启动清理过期缓存的goroutine
 	go pc.cleanup()
 	return pc
+}
+
+// Stop 停止缓存清理协程（幂等操作）
+func (pc *PluginCache) Stop() {
+	if pc != nil {
+		pc.stopOnce.Do(func() {
+			close(pc.stopChan)
+		})
+	}
 }
 
 // Get 获取缓存结果（兼容 chain.PluginCacheIface）
@@ -66,15 +78,20 @@ func (pc *PluginCache) Set(key string, data interface{}) {
 func (pc *PluginCache) cleanup() {
 	ticker := time.NewTicker(pc.ttl)
 	defer ticker.Stop()
-	for range ticker.C {
-		pc.mu.Lock()
-		now := time.Now()
-		for key, result := range pc.cache {
-			if now.After(result.Expire) {
-				delete(pc.cache, key)
+	for {
+		select {
+		case <-pc.stopChan:
+			return
+		case <-ticker.C:
+			pc.mu.Lock()
+			now := time.Now()
+			for key, result := range pc.cache {
+				if now.After(result.Expire) {
+					delete(pc.cache, key)
+				}
 			}
+			pc.mu.Unlock()
 		}
-		pc.mu.Unlock()
 	}
 }
 
