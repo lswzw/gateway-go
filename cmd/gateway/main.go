@@ -366,7 +366,8 @@ func loadRoutePlugins(cfg *config.Config) error {
 func buildEngine() *gin.Engine {
 	r := gin.New()
 
-	// 使用基础的gin中间件
+	// 注册链路最外层中间件：Access Log 与 Recovery
+	r.Use(accessLogMiddleware())
 	r.Use(gin.Recovery())
 
 	registerConfigRoutes(r)
@@ -376,20 +377,198 @@ func buildEngine() *gin.Engine {
 
 // reloadRoutes 重新加载路由
 func reloadRoutes() {
-	// 清除现有路由
-	globalEngine = gin.New()
-	globalEngine.Use(gin.Recovery())
-
-	// 重新注册配置管理路由
-	registerConfigRoutes(globalEngine)
-
-	// 重新注册业务路由
-	registerRoutes(globalEngine)
+	globalEngine = buildEngine()
 
 	// 更新服务器处理器
 	globalServer.Handler = globalEngine
 
 	fmt.Println("✓ 路由已重新加载")
+}
+
+// accessLogMiddleware 构建链路最外层的独立访问日志中间件 (REQ-P0-05)
+func accessLogMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		startTime := time.Now()
+
+		defer func() {
+			if logger.Log == nil {
+				return
+			}
+
+			var logCfg *config.LogConfig
+			if configManager != nil {
+				if cfg := configManager.GetConfig(); cfg != nil {
+					logCfg = &cfg.Log
+				}
+			}
+
+			if logCfg != nil && !logCfg.IsAccessLogEnabled() {
+				return
+			}
+
+			fields := buildAccessFields(c, logCfg, startTime)
+			logger.Log.Info("access", fields...)
+		}()
+
+		c.Next()
+	}
+}
+
+// getErrorKind 根据响应状态码推断错误类型
+func getErrorKind(c *gin.Context, status int) string {
+	if ek := c.GetString("error_kind"); ek != "" {
+		return ek
+	}
+	switch {
+	case status == http.StatusBadGateway:
+		return "bad_gateway"
+	case status == http.StatusGatewayTimeout:
+		return "timeout"
+	case status == http.StatusNotFound:
+		return "not_found"
+	case status >= 500:
+		return "upstream_error"
+	default:
+		return "-"
+	}
+}
+
+// buildAccessFields 构造 access log 字段列表并支持 access_fields 白名单过滤
+func buildAccessFields(c *gin.Context, cfg *config.LogConfig, startTime time.Time) []zap.Field {
+	cost := time.Since(startTime)
+	rtMs := cost.Milliseconds()
+
+	statusCode := c.Writer.Status()
+	if statusCode <= 0 {
+		statusCode = http.StatusOK
+	}
+
+	bytesWritten := int64(c.Writer.Size())
+	if bytesWritten < 0 {
+		bytesWritten = 0
+	}
+
+	upstream := c.GetString("target")
+	if upstream == "" {
+		upstream = "-"
+	}
+
+	reqID := c.GetHeader("X-Request-ID")
+	if reqID == "" {
+		reqID = c.GetHeader("x-request-id")
+	}
+	if reqID == "" {
+		reqID = c.GetString("request_id")
+	}
+	if reqID == "" {
+		reqID = "-"
+	}
+
+	clientIP := c.ClientIP()
+	if clientIP == "" {
+		clientIP = "-"
+	}
+
+	errorKind := getErrorKind(c, statusCode)
+	method := c.Request.Method
+	path := c.Request.URL.Path
+
+	var accessFieldsConfig []string
+	if cfg != nil {
+		accessFieldsConfig = cfg.AccessFields
+	}
+
+	// 构造字段映射表供白名单过滤使用
+	fieldMap := map[string]zap.Field{
+		"status":     zap.Int("status", statusCode),
+		"bytes":      zap.Int64("bytes", bytesWritten),
+		"upstream":   zap.String("upstream", upstream),
+		"target":     zap.String("target", upstream),
+		"rt_ms":      zap.Int64("rt_ms", rtMs),
+		"request_id": zap.String("request_id", reqID),
+		"client_ip":  zap.String("client_ip", clientIP),
+		"error_kind": zap.String("error_kind", errorKind),
+		"method":     zap.String("method", method),
+		"path":       zap.String("path", path),
+		"cost":       zap.Duration("cost", cost),
+	}
+
+	if v, ok := c.Get("body_bytes"); ok {
+		fieldMap["body_bytes"] = zap.Int64("body_bytes", v.(int64))
+	}
+	if v, ok := c.Get("body_sha256"); ok && v.(string) != "" {
+		fieldMap["body_sha256"] = zap.String("body_sha256", v.(string))
+	}
+	if v, ok := c.Get("req_body_bytes"); ok {
+		fieldMap["req_body_bytes"] = zap.Int64("req_body_bytes", v.(int64))
+	}
+	if v, ok := c.Get("req_body_sha256"); ok && v.(string) != "" {
+		fieldMap["req_body_sha256"] = zap.String("req_body_sha256", v.(string))
+	}
+	if v, ok := c.Get("resp_body_bytes"); ok {
+		fieldMap["resp_body_bytes"] = zap.Int64("resp_body_bytes", v.(int64))
+	}
+	if v, ok := c.Get("resp_body_sha256"); ok && v.(string) != "" {
+		fieldMap["resp_body_sha256"] = zap.String("resp_body_sha256", v.(string))
+	}
+	if v, ok := c.Get("sample_req_body"); ok {
+		fieldMap["body"] = zap.String("body", v.(string))
+	}
+	if v, ok := c.Get("sample_resp_body"); ok {
+		fieldMap["resp_body"] = zap.String("resp_body", v.(string))
+	}
+
+	// 如果配置了 AccessFields 白名单，则仅输出指定的字段
+	if len(accessFieldsConfig) > 0 {
+		var fields []zap.Field
+		for _, name := range accessFieldsConfig {
+			if f, exists := fieldMap[name]; exists {
+				fields = append(fields, f)
+			}
+		}
+		return fields
+	}
+
+	// 默认输出标准字段 (status, bytes, upstream, rt_ms, request_id, client_ip, error_kind, method, path)
+	fields := []zap.Field{
+		zap.Int("status", statusCode),
+		zap.Int64("bytes", bytesWritten),
+		zap.String("upstream", upstream),
+		zap.Int64("rt_ms", rtMs),
+		zap.String("request_id", reqID),
+		zap.String("client_ip", clientIP),
+		zap.String("error_kind", errorKind),
+		zap.String("method", method),
+		zap.String("path", path),
+	}
+
+	// 报文流式观测扩展字段（若存在则附加）
+	if f, exists := fieldMap["body_bytes"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["body_sha256"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["req_body_bytes"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["req_body_sha256"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["resp_body_bytes"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["resp_body_sha256"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["body"]; exists {
+		fields = append(fields, f)
+	}
+	if f, exists := fieldMap["resp_body"]; exists {
+		fields = append(fields, f)
+	}
+
+	return fields
 }
 
 // registerConfigRoutes 注册配置管理路由
@@ -665,39 +844,20 @@ func registerRoutes(r *gin.Engine) {
 			logger.Log.Debug("返回给用户", userFields...)
 		}
 
-		// access log: info 级别下简洁日志
-		if logger.Log != nil && logger.Log.Core().Enabled(zap.InfoLevel) && !logger.Log.Core().Enabled(zap.DebugLevel) {
-			statusCode := c.Writer.Status()
-			if respStatusCode > 0 {
-				statusCode = respStatusCode
+		// 存储报文观测统计值至上下文供外层访问日志读取
+		c.Set("body_bytes", payloadBytes)
+		c.Set("body_sha256", payloadSHA)
+		c.Set("req_body_bytes", reqBytes)
+		c.Set("req_body_sha256", reqSHA)
+		c.Set("resp_body_bytes", respBytes)
+		c.Set("resp_body_sha256", respSHA)
+		if bodyLimit > 0 {
+			if len(reqSample) > 0 {
+				c.Set("sample_req_body", string(reqSample))
 			}
-			target := "-"
-			if v, ok := c.Get("target"); ok {
-				target, _ = v.(string)
+			if len(respSample) > 0 {
+				c.Set("sample_resp_body", string(respSample))
 			}
-			accessFields := []zap.Field{
-				zap.String("method", c.Request.Method),
-				zap.String("path", c.Request.URL.Path),
-				zap.Int("status", statusCode),
-				zap.Duration("cost", cost),
-				zap.String("client_ip", c.ClientIP()),
-				zap.String("target", target),
-				zap.Int64("body_bytes", payloadBytes),
-				zap.String("body_sha256", payloadSHA),
-				zap.Int64("req_body_bytes", reqBytes),
-				zap.String("req_body_sha256", reqSHA),
-				zap.Int64("resp_body_bytes", respBytes),
-				zap.String("resp_body_sha256", respSHA),
-			}
-			if bodyLimit > 0 {
-				if len(reqSample) > 0 {
-					accessFields = append(accessFields, zap.String("body", string(reqSample)))
-				}
-				if len(respSample) > 0 {
-					accessFields = append(accessFields, zap.String("resp_body", string(respSample)))
-				}
-			}
-			logger.Log.Info("access", accessFields...)
 		}
 	})
 
