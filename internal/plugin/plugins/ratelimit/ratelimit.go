@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"gateway-go/internal/metrics"
 	"gateway-go/internal/netutil"
 	"gateway-go/internal/plugin/core"
 	"gateway-go/internal/response"
@@ -125,6 +126,7 @@ func (p *RateLimitPlugin) Execute(ctx *gin.Context) error {
 
 	// 尝试获取令牌
 	if !bucket.allow() {
+		metrics.RecordRateLimitRejected(ctx.GetString("route_name"))
 		response.RespondError(ctx, http.StatusTooManyRequests, "请求过于频繁", response.GetRequestID(ctx))
 		return nil
 	}

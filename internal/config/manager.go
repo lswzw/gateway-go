@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"gateway-go/internal/metrics"
+
 	"github.com/fsnotify/fsnotify"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
@@ -129,6 +131,7 @@ func (cm *ConfigManager) LoadConfig(configPath string) error {
 		cm.versionSeq = 1
 		cm.version = "1"
 	}
+	metrics.SetConfigVersion(cm.version)
 
 	fmt.Printf("✓ 配置文件 %s 加载成功\n", configPath)
 	return nil
@@ -142,6 +145,7 @@ func (cm *ConfigManager) ReloadConfig() error {
 	// 1. 测试并解析新配置语法 (如果失败，不改变任何现有状态)
 	newConfig, err := cm.ParseConfigFile(cm.configPath)
 	if err != nil {
+		metrics.RecordReload("failure")
 		cm.mu.RLock()
 		oldVer := cm.version
 		if oldVer == "" {
@@ -170,6 +174,7 @@ func (cm *ConfigManager) ReloadConfig() error {
 	// 2. 准备阶段：构建新路由快照与插件引擎
 	if cm.prepareHook != nil {
 		if err := cm.prepareHook(newConfig, nextVersion); err != nil {
+			metrics.RecordReload("failure")
 			if cm.rollbackHook != nil {
 				cm.rollbackHook(newConfig, err)
 			}
@@ -184,6 +189,7 @@ func (cm *ConfigManager) ReloadConfig() error {
 	// 3. 执行重载钩子。若任何钩子失败，执行回滚并保留旧快照与版本号
 	for _, hook := range cm.reloadHooks {
 		if err := hook(newConfig); err != nil {
+			metrics.RecordReload("failure")
 			// 回滚：不应用新快照，保留旧配置与版本号
 			if cm.rollbackHook != nil {
 				cm.rollbackHook(newConfig, err)
@@ -199,6 +205,7 @@ func (cm *ConfigManager) ReloadConfig() error {
 	// 4. 所有钩子成功，提交快照原子切换
 	if cm.commitHook != nil {
 		if err := cm.commitHook(newConfig, nextVersion); err != nil {
+			metrics.RecordReload("failure")
 			if cm.rollbackHook != nil {
 				cm.rollbackHook(newConfig, err)
 			}
@@ -214,6 +221,9 @@ func (cm *ConfigManager) ReloadConfig() error {
 	cm.currentConfig = newConfig
 	cm.versionSeq++
 	cm.version = nextVersion
+
+	metrics.RecordReload("success")
+	metrics.SetConfigVersion(cm.version)
 
 	duration := time.Since(startTime)
 	if cm.onReloadEvent != nil {

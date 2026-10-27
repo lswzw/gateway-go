@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,100 @@ import (
 
 func init() {
 	gin.SetMode(gin.TestMode)
+}
+
+func TestGenerateRequestID(t *testing.T) {
+	id1 := GenerateRequestID()
+	id2 := GenerateRequestID()
+
+	if id1 == "" || id2 == "" {
+		t.Fatal("GenerateRequestID returned empty string")
+	}
+	if id1 == id2 {
+		t.Fatalf("expected unique IDs, got duplicate: %s", id1)
+	}
+	// Check UUID format (36 chars with 4 dashes)
+	if len(id1) != 36 || strings.Count(id1, "-") != 4 {
+		t.Fatalf("expected UUID format (len 36 with 4 dashes), got %s", id1)
+	}
+}
+
+func TestRequestIDMiddleware_Generated(t *testing.T) {
+	r := gin.New()
+	r.Use(RequestIDMiddleware())
+	var capturedCtxID string
+	r.GET("/test", func(c *gin.Context) {
+		capturedCtxID = c.GetString("request_id")
+		c.String(http.StatusOK, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	respHdrID := w.Header().Get("X-Request-ID")
+	if respHdrID == "" {
+		t.Fatal("expected X-Request-ID response header, got empty")
+	}
+	if capturedCtxID == "" {
+		t.Fatal("expected request_id in gin.Context, got empty")
+	}
+	if respHdrID != capturedCtxID {
+		t.Fatalf("expected matching header (%s) and context ID (%s)", respHdrID, capturedCtxID)
+	}
+}
+
+func TestRequestIDMiddleware_Preserved(t *testing.T) {
+	testCases := []struct {
+		name       string
+		headerKey  string
+		headerVal  string
+		expectedID string
+	}{
+		{
+			name:       "X-Request-ID",
+			headerKey:  "X-Request-ID",
+			headerVal:  "client-id-custom-123",
+			expectedID: "client-id-custom-123",
+		},
+		{
+			name:       "lowercase x-request-id",
+			headerKey:  "x-request-id",
+			headerVal:  "lower-id-custom-456",
+			expectedID: "lower-id-custom-456",
+		},
+		{
+			name:       "X-Request-Id",
+			headerKey:  "X-Request-Id",
+			headerVal:  "mixed-id-custom-789",
+			expectedID: "mixed-id-custom-789",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := gin.New()
+			r.Use(RequestIDMiddleware())
+			var capturedCtxID string
+			r.GET("/test", func(c *gin.Context) {
+				capturedCtxID = c.GetString("request_id")
+				c.String(http.StatusOK, "ok")
+			})
+
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest("GET", "/test", nil)
+			req.Header.Set(tc.headerKey, tc.headerVal)
+			r.ServeHTTP(w, req)
+
+			respHdrID := w.Header().Get("X-Request-ID")
+			if respHdrID != tc.expectedID {
+				t.Fatalf("expected X-Request-ID %q, got %q", tc.expectedID, respHdrID)
+			}
+			if capturedCtxID != tc.expectedID {
+				t.Fatalf("expected context request_id %q, got %q", tc.expectedID, capturedCtxID)
+			}
+		})
+	}
 }
 
 func TestGetRequestID(t *testing.T) {
@@ -78,6 +173,10 @@ func TestRespondError(t *testing.T) {
 
 	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %s", ct)
+	}
+
+	if rid := w.Header().Get("X-Request-ID"); rid != "req-test-1" {
+		t.Errorf("expected X-Request-ID req-test-1, got %s", rid)
 	}
 
 	expectedLen := strconv.Itoa(w.Body.Len())
