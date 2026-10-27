@@ -127,6 +127,9 @@ func With(fields ...zap.Field) *zap.Logger {
 
 // Sync 同步日志
 func Sync() error {
+	if Log == nil {
+		return nil
+	}
 	return Log.Sync()
 }
 

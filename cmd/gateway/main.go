@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -88,7 +90,8 @@ func main() {
 
 	// 启动服务
 	if err := startServer(); err != nil {
-		log.Fatalf("启动服务失败: %v", err)
+		fmt.Fprintf(os.Stderr, "启动服务失败: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -143,7 +146,21 @@ func testConfiguration(configPath string) error {
 
 // handleSignalCommand 处理信号命令
 func handleSignalCommand(signalType string) error {
-	pid, err := readPIDFile()
+	pidPath := PIDFile
+	if *configPath != "" {
+		if cm := config.NewConfigManager(*configPath); cm != nil {
+			if err := cm.LoadConfig(*configPath); err == nil {
+				pidPath = getPIDFilePath(cm.GetConfig())
+			}
+		}
+	}
+	if _, err := os.Stat(pidPath); os.IsNotExist(err) && pidPath != PIDFile {
+		if _, errDefault := os.Stat(PIDFile); errDefault == nil {
+			pidPath = PIDFile
+		}
+	}
+
+	pid, err := readPIDFile(pidPath)
 	if err != nil {
 		return fmt.Errorf("读取PID文件失败: %w", err)
 	}
@@ -247,36 +264,154 @@ func startServer() error {
 
 	// 构建HTTP服务器
 	globalEngine = buildEngine()
-	globalServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: globalEngine,
-	}
+	globalServer = newHTTPServer(cfg, globalEngine)
 
 	// 写入PID文件
-	if err := writePIDFile(); err != nil {
+	pidPath := getPIDFilePath(cfg)
+	if err := writePIDFile(pidPath); err != nil {
 		return fmt.Errorf("写入PID文件失败: %w", err)
 	}
-	defer os.Remove(PIDFile)
+	defer os.Remove(pidPath)
 
-	// 启动HTTP服务
+	return runServer(context.Background(), globalServer, cfg, pluginManager, configManager)
+}
+
+// newHTTPServer 根据配置构建 http.Server 实例
+func newHTTPServer(cfg *config.Config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:           handler,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		ReadHeaderTimeout: cfg.Server.GetReadHeaderTimeout(),
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
+	}
+}
+
+// GracefulServer 封装服务器生命周期及优雅关闭
+type GracefulServer struct {
+	server        *http.Server
+	pluginManager *plugin.Manager
+	configManager *config.ConfigManager
+	timeout       time.Duration
+	shutdownOnce  sync.Once
+	shutdownErr   error
+}
+
+// NewGracefulServer 创建优雅退出服务器实例
+func NewGracefulServer(srv *http.Server, pm *plugin.Manager, cm *config.ConfigManager, timeout time.Duration) *GracefulServer {
+	return &GracefulServer{
+		server:        srv,
+		pluginManager: pm,
+		configManager: cm,
+		timeout:       timeout,
+	}
+}
+
+// Shutdown 优雅关闭服务器（幂等操作，多次调用不 panic）
+func (gs *GracefulServer) Shutdown(ctx context.Context) error {
+	gs.shutdownOnce.Do(func() {
+		gs.shutdownErr = gs.doShutdown(ctx)
+	})
+	return gs.shutdownErr
+}
+
+func (gs *GracefulServer) doShutdown(ctx context.Context) error {
+	var shutdownErr error
+
+	timeout := gs.timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// 1. 停止接受新连接并等待在途请求处理完成
+	if err := gs.server.Shutdown(shutdownCtx); err != nil {
+		// 超时或发生错误时强制关闭所有活跃连接
+		_ = gs.server.Close()
+		shutdownErr = fmt.Errorf("server shutdown error: %w", err)
+	}
+
+	// 2. 停止所有插件
+	if gs.pluginManager != nil {
+		if err := gs.pluginManager.StopAll(); err != nil {
+			if shutdownErr == nil {
+				shutdownErr = fmt.Errorf("plugin stop error: %w", err)
+			}
+		}
+	}
+
+	// 3. 停止配置管理器
+	if gs.configManager != nil {
+		gs.configManager.Stop()
+	}
+
+	// 4. 同步日志
+	_ = logger.Sync()
+
+	return shutdownErr
+}
+
+// runServer 运行 HTTP 服务器并监听中断信号与运行错误
+func runServer(ctx context.Context, srv *http.Server, cfg *config.Config, pm *plugin.Manager, cm *config.ConfigManager) error {
+	gs := NewGracefulServer(srv, pm, cm, cfg.Server.GracefulShutdownTimeout)
+	errCh := make(chan error, 1)
+
+	// 启动 HTTP 服务，启动/运行错误通过 errCh 传递到主流程
 	go func() {
 		fmt.Printf("启动HTTP服务器，监听端口: %d\n", cfg.Server.Port)
-		if err := globalServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP服务器启动失败: %v", err)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
 		}
 	}()
 
-	// 等待中断信号
-	quit := make(chan os.Signal, 1)
+	// 监听中断信号 (SIGINT, SIGTERM)
+	quit := make(chan os.Signal, 2)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	defer signal.Stop(quit)
 
-	fmt.Println("正在关闭服务器...")
+	done := make(chan struct{})
+	defer close(done)
 
-	// 停止配置管理器
-	configManager.Stop()
-
-	return nil
+	select {
+	case err := <-errCh:
+		fmt.Printf("HTTP服务器启动或运行失败: %v\n", err)
+		return fmt.Errorf("http server failed: %w", err)
+	case sig := <-quit:
+		fmt.Printf("收到信号 %v，正在优雅关闭服务器...\n", sig)
+		// 监听后续重复信号，使用 sync.Once 保护，不 panic
+		go func() {
+			for {
+				select {
+				case s, ok := <-quit:
+					if !ok {
+						return
+					}
+					fmt.Printf("再次收到信号 %v，已在关闭中\n", s)
+					_ = gs.Shutdown(context.Background())
+				case <-done:
+					return
+				}
+			}
+		}()
+		if err := gs.Shutdown(context.Background()); err != nil {
+			fmt.Printf("优雅关闭失败: %v\n", err)
+			return err
+		}
+		fmt.Println("服务器已优雅退出")
+		return nil
+	case <-ctx.Done():
+		fmt.Println("上下文取消，正在优雅关闭服务器...")
+		if err := gs.Shutdown(context.Background()); err != nil {
+			fmt.Printf("优雅关闭失败: %v\n", err)
+			return err
+		}
+		fmt.Println("服务器已优雅退出")
+		return nil
+	}
 }
 
 // registerPlugins 注册所有插件
@@ -677,15 +812,23 @@ func matchRoute(path string, match config.RouteMatch, c *gin.Context) bool {
 	return true
 }
 
+// getPIDFilePath 获取 PID 文件路径
+func getPIDFilePath(cfg *config.Config) string {
+	if cfg != nil {
+		return cfg.Server.GetPIDFile()
+	}
+	return PIDFile
+}
+
 // writePIDFile 写入PID文件
-func writePIDFile() error {
+func writePIDFile(path string) error {
 	pid := os.Getpid()
-	return os.WriteFile(PIDFile, []byte(fmt.Sprintf("%d", pid)), 0644)
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d", pid)), 0644)
 }
 
 // readPIDFile 读取PID文件
-func readPIDFile() (int, error) {
-	data, err := os.ReadFile(PIDFile)
+func readPIDFile(path string) (int, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
 	}

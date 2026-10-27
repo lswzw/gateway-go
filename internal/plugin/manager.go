@@ -21,6 +21,7 @@ type Manager struct {
 	// 插件注册表（保持向后兼容）
 	registry map[string]core.Plugin
 	mu       sync.RWMutex
+	stopOnce sync.Once
 
 	pluginCache *PluginCache // 插件结果缓存
 }
@@ -127,5 +128,26 @@ func (m *Manager) Execute(ctx *gin.Context, routeName string) error {
 		}
 	}
 
+	return nil
+}
+
+// StopAll 停止所有可用插件（幂等操作）
+func (m *Manager) StopAll() error {
+	var errs []error
+	m.stopOnce.Do(func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		for name, p := range m.availablePlugins {
+			if p != nil {
+				if err := p.Stop(); err != nil {
+					errs = append(errs, fmt.Errorf("停止插件 %s 失败: %w", name, err))
+				}
+			}
+		}
+	})
+	if len(errs) > 0 {
+		return fmt.Errorf("停止插件时发生错误: %v", errs)
+	}
 	return nil
 }

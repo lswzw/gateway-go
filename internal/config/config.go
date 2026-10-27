@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -28,6 +29,27 @@ type ServerConfig struct {
 	GracefulShutdownTimeout time.Duration `yaml:"graceful_shutdown_timeout" mapstructure:"graceful_shutdown_timeout"`
 	PIDFile                 string        `yaml:"pid_file" mapstructure:"pid_file"`
 	TrustedProxies          []string      `yaml:"trusted_proxies" mapstructure:"trusted_proxies"`
+}
+
+// GetReadHeaderTimeout 获取实际生效的 ReadHeaderTimeout
+// 如果未配置或<=0，则默认为 ReadTimeout 的一半
+func (s *ServerConfig) GetReadHeaderTimeout() time.Duration {
+	if s.ReadHeaderTimeout > 0 {
+		return s.ReadHeaderTimeout
+	}
+	return s.ReadTimeout / 2
+}
+
+// GetPIDFile 获取 PID 文件路径
+// 优先使用配置的 PIDFile，未配置时回退到 /tmp/gateway-go-<port>.pid 或 /tmp/gateway.pid
+func (s *ServerConfig) GetPIDFile() string {
+	if s.PIDFile != "" {
+		return s.PIDFile
+	}
+	if s.Port > 0 {
+		return fmt.Sprintf("/tmp/gateway-go-%d.pid", s.Port)
+	}
+	return "/tmp/gateway.pid"
 }
 
 // LogConfig 日志配置
