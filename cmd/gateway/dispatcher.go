@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Snapshot 路由快照结构体 (REQ-P1-02 前半)
+// Snapshot 路由快照结构体 (REQ-P1-02)
 type Snapshot struct {
 	Version       string
 	Config        *config.Config
@@ -267,6 +267,9 @@ func setupReloadLifecycle(cm *config.ConfigManager, dispatcher *Dispatcher) {
 			globalEngine = snap.Engine
 			if snap.RouterManager != nil {
 				routerManager = snap.RouterManager
+			}
+			if snap.PluginManager != nil {
+				pluginManager = snap.PluginManager
 			}
 
 			// 延迟释放旧快照资源（保留在途请求正常处理）

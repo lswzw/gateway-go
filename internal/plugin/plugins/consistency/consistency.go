@@ -44,6 +44,10 @@ type ConsistencyPlugin struct {
 	config *Config
 	// 用于存储已使用的 nonce
 	usedNonces sync.Map
+	stopChan   chan struct{}
+	stopOnce   sync.Once
+	running    bool
+	mu         sync.Mutex
 }
 
 // Config 插件配置
@@ -78,11 +82,22 @@ func New() *ConsistencyPlugin {
 			CheckResponse:     false,
 			TimestampValidity: 300, // 默认 5 分钟
 		},
+		stopChan: make(chan struct{}),
 	}
 }
 
-// Init 初始化插件
+// Init 初始化插件 (幂等且可重入 REQ-P1-02)
 func (p *ConsistencyPlugin) Init(config interface{}) error {
+	p.mu.Lock()
+	if p.running && p.stopChan != nil {
+		close(p.stopChan)
+		p.running = false
+	}
+	p.stopChan = make(chan struct{})
+	p.stopOnce = sync.Once{}
+	p.running = true
+	p.mu.Unlock()
+
 	if config == nil {
 		return nil
 	}
@@ -435,4 +450,19 @@ func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Pusher 实现 http.Pusher 接口
 func (w *responseWriter) Pusher() http.Pusher {
 	return w.ResponseWriter.(http.Pusher)
+}
+
+// Stop 停止插件 (sync.Once 保护，重复调用安全不 panic REQ-P1-02)
+func (p *ConsistencyPlugin) Stop() error {
+	p.stopOnce.Do(func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.running {
+			p.running = false
+			if p.stopChan != nil {
+				close(p.stopChan)
+			}
+		}
+	})
+	return nil
 }
