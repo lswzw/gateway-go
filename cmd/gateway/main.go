@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -233,16 +232,18 @@ func startServer() error {
 		return fmt.Errorf("加载路由插件失败: %w", err)
 	}
 
-	// 初始化路由管理器
-	routerManager = router.NewManagerFromConfig(configManager, pluginManager)
+	// 初始化路由管理器 (REQ-P1-03)
+	routerManager = router.NewManagerWithConfig(cfg)
 
 	// 构建HTTP服务器与初始快照 (REQ-P1-02 前半)
 	globalEngine = buildEngine()
 	initialSnapshot := &Snapshot{
-		Version:   configManager.GetVersion(),
-		Config:    cfg,
-		Engine:    globalEngine,
-		CreatedAt: time.Now(),
+		Version:       configManager.GetVersion(),
+		Config:        cfg,
+		Engine:        globalEngine,
+		RouterManager: routerManager,
+		PluginManager: pluginManager,
+		CreatedAt:     time.Now(),
 		cleanup: func() {
 			if pluginManager != nil {
 				_ = pluginManager.StopAll()
@@ -553,6 +554,12 @@ func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 
 // buildEngineWithConfigAndPlugins 使用给定配置和插件管理器构建gin引擎 (REQ-P1-02)
 func buildEngineWithConfigAndPlugins(cfg *config.Config, pm *plugin.Manager) *gin.Engine {
+	rm := router.NewManagerWithConfig(cfg)
+	return buildEngineWithConfigPluginsAndRouter(cfg, pm, rm)
+}
+
+// buildEngineWithConfigPluginsAndRouter 使用给定配置、插件管理器及路由管理器构建gin引擎 (REQ-P1-03)
+func buildEngineWithConfigPluginsAndRouter(cfg *config.Config, pm *plugin.Manager, rm *router.Manager) *gin.Engine {
 	r := gin.New()
 
 	// 注册链路最外层中间件：Access Log 与统一错误输出的 customRecovery
@@ -573,7 +580,7 @@ func buildEngineWithConfigAndPlugins(cfg *config.Config, pm *plugin.Manager) *gi
 	netutil.SetDefaultTrustedProxies(trustedProxies)
 
 	registerConfigRoutes(r)
-	registerRoutesWithConfigAndPlugins(r, cfg, pm)
+	registerRoutesWithConfigPluginsAndRouter(r, cfg, pm, rm)
 	return r
 }
 
@@ -805,23 +812,22 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 
 // registerRoutesWithConfigAndPlugins 使用指定配置及插件管理器注册业务路由 (REQ-P1-02)
 func registerRoutesWithConfigAndPlugins(r *gin.Engine, cfg *config.Config, pm *plugin.Manager) {
-	if cfg == nil {
+	rm := router.NewManagerWithConfig(cfg)
+	registerRoutesWithConfigPluginsAndRouter(r, cfg, pm, rm)
+}
+
+// registerRoutesWithConfigPluginsAndRouter 使用指定配置、插件管理器及路由管理器注册业务路由 (REQ-P1-03)
+func registerRoutesWithConfigPluginsAndRouter(r *gin.Engine, cfg *config.Config, pm *plugin.Manager, rm *router.Manager) {
+	if cfg == nil || rm == nil {
 		return
 	}
-
-	// 按优先级排序路由
-	routes := make([]config.RouteConfig, len(cfg.Routes))
-	copy(routes, cfg.Routes)
-	sort.Slice(routes, func(i, j int) bool {
-		return routes[i].Match.Priority > routes[j].Match.Priority
-	})
 
 	var trustedProxies []string
 	if cfg != nil {
 		trustedProxies = cfg.Server.TrustedProxies
 	}
 
-	// 创建路由处理中间件
+	// 创建路由处理中间件，使用 router.Manager 进行路由匹配 (REQ-P1-03)
 	r.Use(func(c *gin.Context) {
 		startTime := time.Now()
 
@@ -863,31 +869,24 @@ func registerRoutesWithConfigAndPlugins(r *gin.Engine, cfg *config.Config, pm *p
 		}
 
 		path := c.Request.URL.Path
-		var matchedRoute *config.RouteConfig
 
-		// 查找匹配的路由
-		for _, route := range routes {
-			if matchRoute(path, route.Match, c) {
-				matchedRoute = &route
-				if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
-					headers, _ := c.Get("_debug_headers")
-					logger.Log.Debug("匹配到路由",
-						zap.String("route_name", route.Name),
-						zap.String("method", c.Request.Method),
-						zap.String("path", c.Request.URL.Path),
-						zap.String("match_type", route.Match.Type),
-						zap.String("match_path", route.Match.Path),
-						zap.Any("standard_headers", headers),
-					)
-				}
-				break
-			}
-		}
-
-		// 如果没有匹配的路由，继续下一个处理器
-		if matchedRoute == nil {
+		// 使用 router.Manager 匹配路由规则 (REQ-P1-03 单一事实来源)
+		matchedRoute, err := rm.MatchRoute(c)
+		if err != nil {
 			c.Next()
 			return
+		}
+
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
+			headers, _ := c.Get("_debug_headers")
+			logger.Log.Debug("匹配到路由",
+				zap.String("route_name", matchedRoute.Name),
+				zap.String("method", c.Request.Method),
+				zap.String("path", c.Request.URL.Path),
+				zap.String("match_type", string(matchedRoute.Match.Type)),
+				zap.String("match_path", matchedRoute.Match.Path),
+				zap.Any("standard_headers", headers),
+			)
 		}
 
 		// 设置目标信息到上下文
@@ -980,7 +979,7 @@ func registerRoutesWithConfigAndPlugins(r *gin.Engine, cfg *config.Config, pm *p
 
 		// 处理路径前缀
 		proxyPath := path
-		if matchedRoute.Match.Type == "prefix" && matchedRoute.Match.Path != "/" {
+		if (matchedRoute.Match.Type == router.MatchPrefix || string(matchedRoute.Match.Type) == "prefix") && matchedRoute.Match.Path != "/" {
 			proxyPath = strings.TrimPrefix(path, matchedRoute.Match.Path)
 			if !strings.HasPrefix(proxyPath, "/") {
 				proxyPath = "/" + proxyPath
@@ -1131,45 +1130,6 @@ func registerRoutesWithConfigAndPlugins(r *gin.Engine, cfg *config.Config, pm *p
 // respondError 统一写出错误响应
 func respondError(c *gin.Context, code int, message string, requestID string) {
 	response.RespondError(c, code, message, requestID)
-}
-
-// matchRoute 检查路径是否匹配路由规则
-func matchRoute(path string, match config.RouteMatch, c *gin.Context) bool {
-	// 路径匹配
-	matched := false
-	switch match.Type {
-	case "exact":
-		matched = path == match.Path
-	case "prefix":
-		matched = strings.HasPrefix(path, match.Path)
-	default:
-		matched = path == match.Path
-	}
-	if !matched {
-		return false
-	}
-	// Host 匹配
-	if match.Host != "" && c.Request.Host != match.Host {
-		return false
-	}
-	// Method 匹配
-	if match.Method != "" && c.Request.Method != match.Method {
-		return false
-	}
-	// Headers 匹配
-	for k, v := range match.Headers {
-		reqVal := c.GetHeader(k)
-		if reqVal != v {
-			return false
-		}
-	}
-	// QueryParams 匹配
-	for k, v := range match.QueryParams {
-		if c.Query(k) != v {
-			return false
-		}
-	}
-	return true
 }
 
 // getPIDFilePath 获取 PID 文件路径

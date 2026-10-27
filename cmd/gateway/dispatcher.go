@@ -10,6 +10,7 @@ import (
 	"gateway-go/internal/config"
 	"gateway-go/internal/logger"
 	"gateway-go/internal/plugin"
+	"gateway-go/internal/router"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -17,11 +18,13 @@ import (
 
 // Snapshot 路由快照结构体 (REQ-P1-02 前半)
 type Snapshot struct {
-	Version   string
-	Config    *config.Config
-	Engine    *gin.Engine
-	CreatedAt time.Time
-	cleanup   func()
+	Version       string
+	Config        *config.Config
+	Engine        *gin.Engine
+	RouterManager *router.Manager
+	PluginManager *plugin.Manager
+	CreatedAt     time.Time
+	cleanup       func()
 }
 
 // Release 释放快照资源
@@ -201,14 +204,19 @@ func buildSnapshotForConfig(newCfg *config.Config, nextVersion string) (*Snapsho
 		return nil, fmt.Errorf("加载路由插件失败: %w", err)
 	}
 
-	// 4. 构建绑定该插件管理器的 gin.Engine
-	engine := buildEngineWithConfigAndPlugins(newCfg, pm)
+	// 4. 构建独立的 router.Manager (REQ-P1-03)
+	rm := router.NewManagerWithConfig(newCfg)
+
+	// 5. 构建绑定该插件管理器与路由管理器的 gin.Engine
+	engine := buildEngineWithConfigPluginsAndRouter(newCfg, pm, rm)
 
 	snap := &Snapshot{
-		Version:   nextVersion,
-		Config:    newCfg,
-		Engine:    engine,
-		CreatedAt: time.Now(),
+		Version:       nextVersion,
+		Config:        newCfg,
+		Engine:        engine,
+		RouterManager: rm,
+		PluginManager: pm,
+		CreatedAt:     time.Now(),
 		cleanup: func() {
 			_ = pm.StopAll()
 		},
@@ -252,6 +260,9 @@ func setupReloadLifecycle(cm *config.ConfigManager, dispatcher *Dispatcher) {
 			// 原子切换快照
 			oldSnap := dispatcher.Swap(snap)
 			globalEngine = snap.Engine
+			if snap.RouterManager != nil {
+				routerManager = snap.RouterManager
+			}
 
 			// 延迟释放旧快照资源（保留在途请求正常处理）
 			if oldSnap != nil {
