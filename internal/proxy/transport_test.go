@@ -14,11 +14,11 @@ func TestTransportPool(t *testing.T) {
 	}
 
 	// 验证配置符合 REQ-P1-01 规范
-	if t1.MaxIdleConns != 1000 {
-		t.Errorf("expected MaxIdleConns 1000, got %d", t1.MaxIdleConns)
+	if t1.MaxIdleConns != DefaultMaxIdleConns {
+		t.Errorf("expected MaxIdleConns %d, got %d", DefaultMaxIdleConns, t1.MaxIdleConns)
 	}
-	if t1.MaxIdleConnsPerHost != 100 {
-		t.Errorf("expected MaxIdleConnsPerHost 100, got %d", t1.MaxIdleConnsPerHost)
+	if t1.MaxIdleConnsPerHost != DefaultMaxIdleConnsPerHost {
+		t.Errorf("expected MaxIdleConnsPerHost %d, got %d", DefaultMaxIdleConnsPerHost, t1.MaxIdleConnsPerHost)
 	}
 	if t1.IdleConnTimeout != 90*time.Second {
 		t.Errorf("expected IdleConnTimeout 90s, got %v", t1.IdleConnTimeout)
@@ -49,5 +49,25 @@ func TestTransportPool(t *testing.T) {
 	t4 := pool.GetTransport("route-1")
 	if t4 == t1 {
 		t.Error("expected new transport instance after reset")
+	}
+}
+
+// TestTransport_IdlePoolCoversConcurrency 回归测试：单 host 的 idle 连接池必须覆盖常见并发，
+// 否则高并发下退化为"每次请求重新 dial"，产生 TIME_WAIT churn 并耗尽本地端口
+// （实测 800 并发、池=100 时吞吐从 27k 崩到 2.1k RPS）。
+func TestTransport_IdlePoolCoversConcurrency(t *testing.T) {
+	const minConcurrency = 1024
+
+	tr := NewTransport()
+	if tr.MaxIdleConnsPerHost < minConcurrency {
+		t.Errorf("MaxIdleConnsPerHost=%d 过小（< %d），高并发下会发生连接 churn",
+			tr.MaxIdleConnsPerHost, minConcurrency)
+	}
+	if tr.MaxIdleConns < tr.MaxIdleConnsPerHost {
+		t.Errorf("MaxIdleConns=%d 应不小于 MaxIdleConnsPerHost=%d",
+			tr.MaxIdleConns, tr.MaxIdleConnsPerHost)
+	}
+	if tr.DisableKeepAlives {
+		t.Error("DisableKeepAlives 必须为 false，否则每个请求都会新建连接")
 	}
 }
