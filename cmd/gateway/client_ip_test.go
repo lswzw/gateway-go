@@ -215,6 +215,9 @@ func TestIPWhitelist_Integration_SpoofedXFFRejected(t *testing.T) {
 		if err := p.Execute(c); err != nil {
 			return
 		}
+		if c.IsAborted() {
+			return
+		}
 		c.JSON(200, gin.H{
 			"message":   "welcome",
 			"client_ip": netutil.ClientIP(c, nil),
@@ -238,8 +241,12 @@ func TestIPWhitelist_Integration_SpoofedXFFRejected(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if resp["error"] != "IP 不在白名单中" {
-		t.Fatalf("expected error message 'IP 不在白名单中', got: %v", resp["error"])
+	msg, _ := resp["message"].(string)
+	if msg == "" {
+		msg, _ = resp["error"].(string)
+	}
+	if msg != "IP 不在白名单中" {
+		t.Fatalf("expected message 'IP 不在白名单中', got: %v", msg)
 	}
 
 	// 2. Client connects from whitelisted IP directly (10.1.2.3)

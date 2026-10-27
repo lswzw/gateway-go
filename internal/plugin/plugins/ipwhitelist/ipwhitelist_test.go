@@ -35,8 +35,11 @@ func TestIPWhitelist_SpoofedXFFRejected(t *testing.T) {
 	c.Request = req
 
 	err := plugin.Execute(c)
-	if err == nil {
-		t.Fatalf("expected error for spoofed XFF, got nil")
+	if err != nil {
+		t.Fatalf("expected nil error per plugin contract, got: %v", err)
+	}
+	if !c.IsAborted() {
+		t.Fatalf("expected context to be aborted for rejected request")
 	}
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 Forbidden, got status code %d", w.Code)
@@ -92,8 +95,11 @@ func TestIPWhitelist_UntrustedProxyWithAllowedXFFRejected(t *testing.T) {
 	c.Request = req
 
 	err := plugin.Execute(c)
-	if err == nil {
-		t.Fatalf("expected rejection for untrusted proxy, got allowed")
+	if err != nil {
+		t.Fatalf("expected nil error per plugin contract, got: %v", err)
+	}
+	if !c.IsAborted() {
+		t.Fatalf("expected context to be aborted for rejected request")
 	}
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 Forbidden, got %d", w.Code)
