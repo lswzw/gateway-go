@@ -1,12 +1,12 @@
 # 限流插件（rate_limit）
 
 ## 一、概述
-限流插件用于限制API请求速率，防止系统过载。支持IP、用户、全局等多种限流维度，支持内存和Redis存储。
+限流插件用于限制API请求速率，防止系统过载。支持路径、IP、用户、全局四种维度，计数只存放在**本地内存**（不提供 Redis 等外部共享存储，见 `internal/cache` 的设计门禁）。
 
 ## 二、设计目标
 1. 支持多种限流维度
 2. 支持多种限流算法
-3. 灵活配置存储后端
+3. 支持维度化限流（路径 / IP / 用户 / 全局）
 4. 支持跳过部分路径
 5. 完善的错误处理和日志记录
 
@@ -59,20 +59,6 @@
     requests_per_second: 50
     burst: 100
     user_header: X-User-ID
-```
-
-#### Redis存储
-```yaml
-- name: rate_limit
-  enabled: true
-  order: 3
-  config:
-    storage: redis
-    redis:
-      host: localhost
-      port: 6379
-      password: ""
-      db: 0
 ```
 
 ## 六、运行属性

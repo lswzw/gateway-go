@@ -1,0 +1,91 @@
+# 压测专用网关配置：三条被测路径互不干扰，不依赖外部认证服务
+server:
+  port: 8080
+  mode: release
+  read_timeout: "60s"
+  write_timeout: "60s"
+  max_header_bytes: 1048576
+  graceful_shutdown_timeout: "30s"
+
+admin:
+  listen: "0.0.0.0:9090"
+
+# 压测时用 error 级别：既贴近"只为排障开日志"的生产配置，也用于验证
+# access log / body 统计在日志级别不足时确实不再产生开销。
+log:
+  level: error
+  format: json
+  output: stdout
+  max_size: 100
+  max_age: 1
+  max_backups: 1
+  compress: false
+
+plugins:
+  available:
+    # 阈值设到足够高：只测令牌桶路径开销，不产生 429
+    - name: rate_limit
+      enabled: true
+      order: 1
+      config:
+        requests_per_second: 1000000.0
+        burst: 1000000
+        dimension: ip
+    - name: circuit_breaker
+      enabled: true
+      order: 2
+      config:
+        failure_threshold: 1000000
+        success_threshold: 2
+        timeout: 60
+    - name: cors
+      enabled: true
+      order: 3
+      config:
+        allowed_origins: ["*"]
+        allowed_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+        allowed_headers: ["*"]
+        exposed_headers: ["Content-Length"]
+        max_age: "12h"
+        allow_credentials: true
+
+routes:
+  # 网关自身响应（对照基线）
+  - name: self-static
+    match:
+      type: exact
+      path: /
+      priority: 100
+    target:
+      url: internal://default
+      timeout: 30000
+      retries: 0
+    plugins: []
+    response:
+      status: 200
+      content: "gateway-go is running"
+      content_type: "text/plain"
+
+  # 纯转发，不挂插件
+  - name: proxy-noplug
+    match:
+      type: prefix
+      path: /noplug
+      priority: 90
+    target:
+      url: http://backend:80
+      timeout: 30000
+      retries: 0
+    plugins: []
+
+  # 转发 + 插件链（rate_limit -> circuit_breaker -> cors）
+  - name: proxy-plugin
+    match:
+      type: prefix
+      path: /plug
+      priority: 90
+    target:
+      url: http://backend:80
+      timeout: 30000
+      retries: 0
+    plugins: ["rate_limit", "circuit_breaker", "cors"]

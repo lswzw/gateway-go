@@ -66,8 +66,7 @@ plugins:
       config:
         requests_per_second: 100
         burst: 200
-        dimension: ip  # ip, user, global
-        storage: memory  # memory, redis
+        dimension: ip  # path（默认）, ip, user, global
 
     # 熔断器插件
     - name: circuit_breaker
