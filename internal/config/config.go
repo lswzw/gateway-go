@@ -21,20 +21,42 @@ type ServerConfig struct {
 	Port                    int           `yaml:"port" mapstructure:"port"`
 	Mode                    string        `yaml:"mode" mapstructure:"mode"`
 	ReadTimeout             time.Duration `yaml:"read_timeout" mapstructure:"read_timeout"`
+	ReadHeaderTimeout       time.Duration `yaml:"read_header_timeout" mapstructure:"read_header_timeout"`
 	WriteTimeout            time.Duration `yaml:"write_timeout" mapstructure:"write_timeout"`
+	IdleTimeout             time.Duration `yaml:"idle_timeout" mapstructure:"idle_timeout"`
 	MaxHeaderBytes          int           `yaml:"max_header_bytes" mapstructure:"max_header_bytes"`
 	GracefulShutdownTimeout time.Duration `yaml:"graceful_shutdown_timeout" mapstructure:"graceful_shutdown_timeout"`
+	PIDFile                 string        `yaml:"pid_file" mapstructure:"pid_file"`
+	TrustedProxies          []string      `yaml:"trusted_proxies" mapstructure:"trusted_proxies"`
 }
 
 // LogConfig 日志配置
 type LogConfig struct {
-	Level      string `yaml:"level" mapstructure:"level"`
-	Format     string `yaml:"format" mapstructure:"format"`
-	Output     string `yaml:"output" mapstructure:"output"`
-	MaxSize    int    `yaml:"max_size" mapstructure:"max_size"`
-	MaxAge     int    `yaml:"max_age" mapstructure:"max_age"`
-	MaxBackups int    `yaml:"max_backups" mapstructure:"max_backups"`
-	Compress   bool   `yaml:"compress" mapstructure:"compress"`
+	Level        string   `yaml:"level" mapstructure:"level"`
+	Format       string   `yaml:"format" mapstructure:"format"`
+	Output       string   `yaml:"output" mapstructure:"output"`
+	MaxSize      int      `yaml:"max_size" mapstructure:"max_size"`
+	MaxAge       int      `yaml:"max_age" mapstructure:"max_age"`
+	MaxBackups   int      `yaml:"max_backups" mapstructure:"max_backups"`
+	Compress     bool     `yaml:"compress" mapstructure:"compress"`
+	BodyLimit    int      `yaml:"body_limit" mapstructure:"body_limit"`
+	BodySHA256   *bool    `yaml:"body_sha256" mapstructure:"body_sha256"`
+	Access       *bool    `yaml:"access" mapstructure:"access"`
+	AccessFields []string `yaml:"access_fields" mapstructure:"access_fields"`
+}
+
+func (l *LogConfig) IsBodySHA256Enabled() bool {
+	if l.BodySHA256 == nil {
+		return true
+	}
+	return *l.BodySHA256
+}
+
+func (l *LogConfig) IsAccessLogEnabled() bool {
+	if l.Access == nil {
+		return true
+	}
+	return *l.Access
 }
 
 // PluginsConfig 插件配置

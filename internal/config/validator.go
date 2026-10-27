@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -47,6 +48,22 @@ func validateServerConfig(config *ServerConfig) error {
 
 	if config.GracefulShutdownTimeout <= 0 {
 		return fmt.Errorf("无效的优雅关闭超时时间: %v", config.GracefulShutdownTimeout)
+	}
+
+	for _, proxy := range config.TrustedProxies {
+		trimmed := strings.TrimSpace(proxy)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "/") {
+			if _, _, err := net.ParseCIDR(trimmed); err != nil {
+				return fmt.Errorf("无效的可信代理CIDR: %s (%w)", proxy, err)
+			}
+		} else {
+			if ip := net.ParseIP(trimmed); ip == nil {
+				return fmt.Errorf("无效的可信代理IP: %s", proxy)
+			}
+		}
 	}
 
 	return nil
@@ -96,6 +113,10 @@ func validateLogConfig(config *LogConfig) error {
 
 	if config.MaxBackups <= 0 {
 		return fmt.Errorf("无效的备份文件数量: %d", config.MaxBackups)
+	}
+
+	if config.BodyLimit < 0 || config.BodyLimit > 65536 {
+		return fmt.Errorf("无效的请求体记录上限: %d (有效范围 0-65536)", config.BodyLimit)
 	}
 
 	return nil
