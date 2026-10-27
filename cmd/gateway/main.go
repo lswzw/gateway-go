@@ -1027,7 +1027,7 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 				zap.String("path", c.Request.URL.Path),
 				zap.Duration("cost", cost),
 				zap.String("client_ip", netutil.ClientIP(c, cfg.Server.TrustedProxies)),
-				zap.String("target", target),
+				zap.String("target", target.String()),
 				zap.Int64("body_bytes", payloadBytes),
 				zap.String("body_sha256", payloadSHA),
 			}
