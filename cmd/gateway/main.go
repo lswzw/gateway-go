@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"net/http"
@@ -13,6 +16,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -412,25 +416,30 @@ func registerRoutes(r *gin.Engine) {
 
 	// 创建路由处理中间件
 	r.Use(func(c *gin.Context) {
+		startTime := time.Now()
+
+		bodyLimit := 0
+		enableSHA := true
+		if configManager != nil {
+			if cfg := configManager.GetConfig(); cfg != nil {
+				bodyLimit = cfg.Log.BodyLimit
+				enableSHA = cfg.Log.IsBodySHA256Enabled()
+			}
+		}
+
+		var reqObserver *bodyObserver
+		if c.Request.Body != nil && c.Request.Body != http.NoBody {
+			reqObserver = newBodyObserver(c.Request.Body, bodyLimit, enableSHA)
+			c.Request.Body = reqObserver
+		}
+
 		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
 			req := c.Request
 			headers := make(map[string][]string)
 			for k, v := range req.Header {
 				headers[k] = v
 			}
-			// 读取body内容（最多4KB）
-			var bodyStr string
-			if req.Body != nil {
-				bodyBytes, _ := io.ReadAll(io.LimitReader(req.Body, 4096))
-				bodyStr = string(bodyBytes)
-				// 还原body供后续处理
-				req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			}
-			startTime := time.Now()
-			// 捕获响应体
-			blw := &bodyLogWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
-			c.Writer = blw
-			// 1. 收到请求
+			// 1. 收到请求 (注意: 不再读取或回写 req.Body，避免 4KB 截断)
 			logger.Log.Debug("收到请求",
 				zap.String("method", req.Method),
 				zap.String("path", req.URL.Path),
@@ -438,10 +447,8 @@ func registerRoutes(r *gin.Engine) {
 				zap.Any("standard_headers", headers),
 				zap.String("client_ip", c.ClientIP()),
 				zap.Time("start_time", startTime),
-				zap.String("body", bodyStr),
 			)
 			c.Set("_debug_start_time", startTime)
-			c.Set("_debug_req_body", bodyStr)
 			c.Set("_debug_headers", headers)
 		}
 
@@ -574,52 +581,123 @@ func registerRoutes(r *gin.Engine) {
 				"error": fmt.Sprintf("代理请求失败: %v", err),
 			})
 		}
-		// 捕获后端响应体
+		// 观察后端响应体 (流式旁路观察，禁止截断或回写)
+		var respObserver *bodyObserver
+		var respStatusCode int
 		proxy.ModifyResponse = func(resp *http.Response) error {
-			if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
-				respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-				logger.Log.Debug("收到后端响应",
-					zap.String("target_url", matchedRoute.Target.URL),
-					zap.Int("status", resp.StatusCode),
-					zap.String("resp_body", string(respBody)),
-				)
-				resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
+			respStatusCode = resp.StatusCode
+			if resp.Body != nil {
+				respObserver = newBodyObserver(resp.Body, bodyLimit, enableSHA)
+				resp.Body = respObserver
 			}
 			return nil
 		}
 		// 执行代理请求
 		proxy.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
+
+		cost := time.Since(startTime)
+
+		var reqBytes int64
+		var reqSHA string
+		var reqSample []byte
+		if reqObserver != nil {
+			reqBytes = reqObserver.BytesCount()
+			reqSHA = reqObserver.SHA256Hex()
+			reqSample = reqObserver.Sample()
+		}
+
+		var respBytes int64
+		var respSHA string
+		var respSample []byte
+		if respObserver != nil {
+			respBytes = respObserver.BytesCount()
+			respSHA = respObserver.SHA256Hex()
+			respSample = respObserver.Sample()
+		}
+
+		// 主报文统计信息
+		payloadBytes := reqBytes
+		payloadSHA := reqSHA
+		if payloadBytes == 0 && respBytes > 0 {
+			payloadBytes = respBytes
+			payloadSHA = respSHA
+		}
+
 		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
-			startTime, _ := c.Get("_debug_start_time")
-			cost := time.Since(startTime.(time.Time))
-			logger.Log.Debug("返回给用户",
+			// 收到后端响应日志
+			respFields := []zap.Field{
+				zap.String("target_url", matchedRoute.Target.URL),
+				zap.Int("status", respStatusCode),
+				zap.Int64("body_bytes", respBytes),
+				zap.String("body_sha256", respSHA),
+				zap.Int64("resp_body_bytes", respBytes),
+				zap.String("resp_body_sha256", respSHA),
+			}
+			if bodyLimit > 0 && len(respSample) > 0 {
+				respFields = append(respFields, zap.String("resp_body", string(respSample)))
+			}
+			logger.Log.Debug("收到后端响应", respFields...)
+
+			// 请求体转发完成日志 (如果有请求体)
+			if reqBytes > 0 {
+				reqFields := []zap.Field{
+					zap.String("target_url", matchedRoute.Target.URL),
+					zap.Int64("body_bytes", reqBytes),
+					zap.String("body_sha256", reqSHA),
+					zap.Int64("req_body_bytes", reqBytes),
+					zap.String("req_body_sha256", reqSHA),
+				}
+				if bodyLimit > 0 && len(reqSample) > 0 {
+					reqFields = append(reqFields, zap.String("body", string(reqSample)))
+				}
+				logger.Log.Debug("请求转发完成", reqFields...)
+			}
+
+			// 返回给用户
+			userFields := []zap.Field{
 				zap.String("method", c.Request.Method),
 				zap.String("path", c.Request.URL.Path),
 				zap.Duration("cost", cost),
-			)
+				zap.Int64("body_bytes", payloadBytes),
+				zap.String("body_sha256", payloadSHA),
+			}
+			logger.Log.Debug("返回给用户", userFields...)
 		}
 
 		// access log: info 级别下简洁日志
 		if logger.Log != nil && logger.Log.Core().Enabled(zap.InfoLevel) && !logger.Log.Core().Enabled(zap.DebugLevel) {
-			startTime := time.Now()
-			blw := &bodyLogWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
-			c.Writer = blw
-			c.Next()
-			cost := time.Since(startTime)
 			statusCode := c.Writer.Status()
+			if respStatusCode > 0 {
+				statusCode = respStatusCode
+			}
 			target := "-"
 			if v, ok := c.Get("target"); ok {
 				target, _ = v.(string)
 			}
-			logger.Log.Info("access",
+			accessFields := []zap.Field{
 				zap.String("method", c.Request.Method),
 				zap.String("path", c.Request.URL.Path),
 				zap.Int("status", statusCode),
 				zap.Duration("cost", cost),
 				zap.String("client_ip", c.ClientIP()),
 				zap.String("target", target),
-			)
+				zap.Int64("body_bytes", payloadBytes),
+				zap.String("body_sha256", payloadSHA),
+				zap.Int64("req_body_bytes", reqBytes),
+				zap.String("req_body_sha256", reqSHA),
+				zap.Int64("resp_body_bytes", respBytes),
+				zap.String("resp_body_sha256", respSHA),
+			}
+			if bodyLimit > 0 {
+				if len(reqSample) > 0 {
+					accessFields = append(accessFields, zap.String("body", string(reqSample)))
+				}
+				if len(respSample) > 0 {
+					accessFields = append(accessFields, zap.String("resp_body", string(respSample)))
+				}
+			}
+			logger.Log.Info("access", accessFields...)
 		}
 	})
 
@@ -695,14 +773,89 @@ func readPIDFile() (int, error) {
 	return pid, err
 }
 
-// 在文件末尾添加 bodyLogWriter 定义
-
-type bodyLogWriter struct {
-	gin.ResponseWriter
-	body *bytes.Buffer
+// bodyObserver 是一个非侵入的流式 ReadCloser 包装器，
+// 用于在不截断、不整体缓冲进内存的前提下计算传输字节数、SHA-256 及采样前 body_limit 字节。
+type bodyObserver struct {
+	rc         io.ReadCloser
+	hasher     hash.Hash
+	limit      int
+	sampleBuf  bytes.Buffer
+	bytesCount int64
+	closed     bool
+	mu         sync.Mutex
 }
 
-func (w *bodyLogWriter) Write(b []byte) (int, error) {
-	w.body.Write(b)
-	return w.ResponseWriter.Write(b)
+func newBodyObserver(rc io.ReadCloser, limit int, enableSHA bool) *bodyObserver {
+	var h hash.Hash
+	if enableSHA {
+		h = sha256.New()
+	}
+	return &bodyObserver{
+		rc:     rc,
+		hasher: h,
+		limit:  limit,
+	}
+}
+
+func (b *bodyObserver) Read(p []byte) (int, error) {
+	if b.rc == nil {
+		return 0, io.EOF
+	}
+	n, err := b.rc.Read(p)
+	if n > 0 {
+		b.mu.Lock()
+		b.bytesCount += int64(n)
+		if b.hasher != nil {
+			b.hasher.Write(p[:n])
+		}
+		if b.limit > 0 && b.sampleBuf.Len() < b.limit {
+			toWrite := n
+			remaining := b.limit - b.sampleBuf.Len()
+			if toWrite > remaining {
+				toWrite = remaining
+			}
+			b.sampleBuf.Write(p[:toWrite])
+		}
+		b.mu.Unlock()
+	}
+	return n, err
+}
+
+func (b *bodyObserver) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	if b.rc != nil {
+		return b.rc.Close()
+	}
+	return nil
+}
+
+func (b *bodyObserver) BytesCount() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.bytesCount
+}
+
+func (b *bodyObserver) SHA256Hex() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.hasher == nil || b.bytesCount == 0 {
+		return ""
+	}
+	sum := b.hasher.Sum(nil)
+	full := hex.EncodeToString(sum)
+	if len(full) >= 8 {
+		return full[:8]
+	}
+	return full
+}
+
+func (b *bodyObserver) Sample() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sampleBuf.Bytes()
 }
