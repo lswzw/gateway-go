@@ -73,6 +73,7 @@ type Plugin struct {
 	whiteListExact map[string]bool
 	httpClient     *http.Client
 	mu             sync.RWMutex
+	stopOnce       sync.Once
 }
 
 // New 创建插件实例
@@ -257,14 +258,14 @@ func (p *Plugin) callAuthService(ctx *gin.Context, token string) error {
 	}
 }
 
-// Stop 停止插件
+// Stop 停止插件 (sync.Once 保护，重复调用安全不 panic REQ-P1-02)
 func (p *Plugin) Stop() error {
-	// 清理资源
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.stopOnce.Do(func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 
-	p.whiteListRegex = nil
-	p.whiteListExact = make(map[string]bool)
-
+		p.whiteListRegex = nil
+		p.whiteListExact = make(map[string]bool)
+	})
 	return nil
 }

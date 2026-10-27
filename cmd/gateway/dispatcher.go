@@ -15,13 +15,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// Snapshot 路由快照结构体 (REQ-P1-02 前半)
+// Snapshot 路由快照结构体 (REQ-P1-02)
 type Snapshot struct {
-	Version   string
-	Config    *config.Config
-	Engine    *gin.Engine
-	CreatedAt time.Time
-	cleanup   func()
+	Version       string
+	Config        *config.Config
+	Engine        *gin.Engine
+	PluginManager *plugin.Manager
+	CreatedAt     time.Time
+	cleanup       func()
 }
 
 // Release 释放快照资源
@@ -205,10 +206,11 @@ func buildSnapshotForConfig(newCfg *config.Config, nextVersion string) (*Snapsho
 	engine := buildEngineWithConfigAndPlugins(newCfg, pm)
 
 	snap := &Snapshot{
-		Version:   nextVersion,
-		Config:    newCfg,
-		Engine:    engine,
-		CreatedAt: time.Now(),
+		Version:       nextVersion,
+		Config:        newCfg,
+		Engine:        engine,
+		PluginManager: pm,
+		CreatedAt:     time.Now(),
 		cleanup: func() {
 			_ = pm.StopAll()
 		},
@@ -252,6 +254,9 @@ func setupReloadLifecycle(cm *config.ConfigManager, dispatcher *Dispatcher) {
 			// 原子切换快照
 			oldSnap := dispatcher.Swap(snap)
 			globalEngine = snap.Engine
+			if snap.PluginManager != nil {
+				pluginManager = snap.PluginManager
+			}
 
 			// 延迟释放旧快照资源（保留在途请求正常处理）
 			if oldSnap != nil {

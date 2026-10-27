@@ -35,6 +35,7 @@ type LifecycleManager struct {
 	mu        sync.RWMutex
 	stateChan chan *PluginStateChange
 	stopChan  chan struct{}
+	closeOnce sync.Once
 }
 
 // PluginStateChange 插件状态变更
@@ -254,8 +255,10 @@ func (m *LifecycleManager) WatchState() <-chan *PluginStateChange {
 	return m.stateChan
 }
 
-// Close 关闭生命周期管理器
+// Close 关闭生命周期管理器（sync.Once 保护，幂等不 panic REQ-P1-02）
 func (m *LifecycleManager) Close() {
-	close(m.stopChan)
-	close(m.stateChan)
+	m.closeOnce.Do(func() {
+		close(m.stopChan)
+		close(m.stateChan)
+	})
 }
