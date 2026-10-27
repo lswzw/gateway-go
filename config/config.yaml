@@ -229,45 +229,58 @@ routes:
       content: "gateway-go is running"  # 响应内容
       content_type: "text/plain"     # 内容类型
 
-  # API服务路由 - 处理API请求
-  - name: api-service
-    match:
-      type: prefix              # 匹配类型：prefix（前缀匹配）
-      path: /api                # 匹配路径前缀
-      priority: 90              # 路由优先级
-    target:
-      url: http://172.17.0.2:80  # 目标服务地址
-      timeout: 30000            # 请求超时时间
-      retries: 3                # 重试次数
-    plugins: ["interface_auth"]  # 该路由使用的插件列表
-    strip_prefix: true          # 移除 /api 前缀
-
-  # 多租户支持 - 基于主机名的路由
-  - name: tenant1-service
-    match:
-      type: prefix
-      path: /aapi
-      priority: 90
-    target:
-      url: http://172.17.0.2:80
-    plugins: []
-
-  # 版本管理 - 基于主机名的API版本控制
+  # ---------------------------------------------------------------------------
+  # 专有 Host 路由（高特异性，优先匹配）
+  # ---------------------------------------------------------------------------
+  # 版本管理 - 基于主机名的API版本控制 (v1.api.example.com)
   - name: v1-api
     match:
       type: prefix
       path: /api
       host: "v1.api.example.com"
-      priority: 80
+      priority: 90              # 专有 Host 设置合理优先级，避免被泛化路由语义遮蔽
     target:
       url: http://v1-api-service:8080
+      timeout: 30000
+      retries: 3
+    plugins: []
 
-  # 地域路由 - 基于地理位置的请求路由
+  # 地域路由 - 基于地理位置的主机名路由 (us-api.example.com)
   - name: us-api
     match:
       type: prefix
       path: /api
       host: "us-api.example.com"
-      priority: 85
+      priority: 90
     target:
       url: http://us-api-service:8080
+      timeout: 30000
+      retries: 3
+    plugins: []
+
+  # ---------------------------------------------------------------------------
+  # 通用 API 服务路由（无 Host 限定，作为通用 API 服务）
+  # ---------------------------------------------------------------------------
+  - name: api-service
+    match:
+      type: prefix              # 匹配类型：prefix（前缀匹配）
+      path: /api                # 匹配路径前缀
+      priority: 80              # 通用 API 路由，优先级设置低于专有 Host 路由
+    target:
+      url: http://172.17.0.2:80  # 目标服务地址
+      timeout: 30000            # 请求超时时间
+      retries: 3                # 重试次数
+    plugins: ["interface_auth"]  # 该路由使用的插件列表
+    # strip_prefix: 暂不支持
+
+  # 多租户支持服务路由
+  - name: tenant1-service
+    match:
+      type: prefix
+      path: /aapi
+      priority: 80
+    target:
+      url: http://172.17.0.2:80
+      timeout: 30000
+      retries: 3
+    plugins: []

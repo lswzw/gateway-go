@@ -127,11 +127,25 @@ type PluginConfig struct {
 type RouteMatch struct {
 	Type        string            `yaml:"type" mapstructure:"type"`
 	Path        string            `yaml:"path" mapstructure:"path"`
+	Regex       string            `yaml:"regex" mapstructure:"regex"`
 	Priority    int               `yaml:"priority" mapstructure:"priority"`
 	Host        string            `yaml:"host" mapstructure:"host"`
 	Method      string            `yaml:"method" mapstructure:"method"`
 	Headers     map[string]string `yaml:"headers" mapstructure:"headers"`
 	QueryParams map[string]string `yaml:"query_params" mapstructure:"query_params"`
+	ABTest      *ABTestConfig     `yaml:"ab_test" mapstructure:"ab_test"`
+}
+
+// ABTestConfig A/B测试配置 (REQ-P1-03)
+type ABTestConfig struct {
+	Enabled      bool    `yaml:"enabled" mapstructure:"enabled"`
+	GroupA       float64 `yaml:"group_a_percentage" mapstructure:"group_a_percentage"`
+	GroupB       float64 `yaml:"group_b_percentage" mapstructure:"group_b_percentage"`
+	GroupATarget string  `yaml:"group_a_target" mapstructure:"group_a_target"`
+	GroupBTarget string  `yaml:"group_b_target" mapstructure:"group_b_target"`
+	BucketBy     string  `yaml:"bucket_by" mapstructure:"bucket_by"` // 分桶依据，如 "header:X-User-ID", "ip", "cookie:session"
+	WeightA      int     `yaml:"weight_a" mapstructure:"weight_a"`   // 权重模式 Group A
+	WeightB      int     `yaml:"weight_b" mapstructure:"weight_b"`   // 权重模式 Group B
 }
 
 // RouteConfig 路由配置
