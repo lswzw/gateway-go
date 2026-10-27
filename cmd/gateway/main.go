@@ -482,7 +482,6 @@ func runServerWithAdmin(ctx context.Context, srv *http.Server, adminSrv *http.Se
 				errCh <- err
 			}
 		}
-		}
 	}()
 
 	// 启动管理 HTTP 服务 (REQ-P1-04)
@@ -577,16 +576,6 @@ func registerPluginsTo(pm *plugin.Manager) error {
 }
 
 // registerPlugins 注册全局插件管理器所有插件
-func registerPlugins() {
-	if err := registerPluginsTo(pluginManager); err != nil {
-		log.Printf("注册插件失败: %v", err)
-	}
-	fmt.Println("✓ 所有插件已注册")
-}
-	return nil
-}
-
-// registerPlugins 注册所有插件到全局插件管理器
 func registerPlugins() {
 	if err := registerPluginsTo(pluginManager); err != nil {
 		log.Printf("注册插件失败: %v", err)

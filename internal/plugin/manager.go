@@ -247,6 +247,14 @@ func (m *Manager) StopAll() error {
 			}
 		}
 
+		for name, p := range m.registry {
+			if p != nil {
+				if err := p.Stop(); err != nil {
+					errs = append(errs, fmt.Errorf("停止注册插件 %s 失败: %w", name, err))
+				}
+			}
+		}
+
 		if m.pluginCache != nil {
 			m.pluginCache.Stop()
 		}

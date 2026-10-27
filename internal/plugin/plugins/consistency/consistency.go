@@ -85,7 +85,6 @@ func New() *ConsistencyPlugin {
 		},
 		usedNonces: make(map[string]time.Time),
 	}
-	p.startCleanupTicker()
 	return p
 }
 
@@ -155,7 +154,9 @@ func (p *ConsistencyPlugin) Init(config interface{}) error {
 		p.config.MaxNonces = 10000
 	}
 
-	p.startCleanupTicker()
+	if p.config.Enabled {
+		p.startCleanupTicker()
+	}
 	return nil
 }
 

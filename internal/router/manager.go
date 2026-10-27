@@ -80,6 +80,7 @@ type Manager struct {
 	mu            sync.RWMutex
 	watcher       *fsnotify.Watcher
 	pluginManager *plugin.Manager // 保持字段兼容，但 MatchRoute 中不再执行
+	regexMu       sync.RWMutex
 	regexCache    map[string]*regexp.Regexp
 	configManager *config.ConfigManager
 	configCenter  *config.ConfigCenter // 保持向后兼容
@@ -182,6 +183,10 @@ func (m *Manager) ReloadFromConfig(configManager *config.ConfigManager, pluginMa
 
 // buildTrieAndCache 根据当前配置构建 Trie 路由器并重置缓存 (调用方需持有写锁)
 func (m *Manager) buildTrieAndCache() {
+	m.regexMu.Lock()
+	if m.regexCache == nil {
+		m.regexCache = make(map[string]*regexp.Regexp)
+	}
 	m.trieRouter = NewTrieRouter()
 	if m.config != nil {
 		for i := range m.config.Routes {
@@ -211,6 +216,7 @@ func (m *Manager) buildTrieAndCache() {
 			}
 		}
 	}
+	m.regexMu.Unlock()
 	if m.routeCache == nil {
 		m.routeCache = NewRouteCache(DefaultMaxCacheEntries)
 	} else {
@@ -583,16 +589,16 @@ func (m *Manager) matchPath(path string, rule RouteMatch) bool {
 
 // getRegex 获取或编译正则表达式
 func (m *Manager) getRegex(pattern string) (*regexp.Regexp, error) {
-	m.mu.RLock()
+	m.regexMu.RLock()
 	regex, exists := m.regexCache[pattern]
-	m.mu.RUnlock()
+	m.regexMu.RUnlock()
 
 	if exists {
 		return regex, nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.regexMu.Lock()
+	defer m.regexMu.Unlock()
 
 	if regex, exists = m.regexCache[pattern]; exists {
 		return regex, nil
@@ -603,15 +609,18 @@ func (m *Manager) getRegex(pattern string) (*regexp.Regexp, error) {
 		return nil, err
 	}
 
+	if m.regexCache == nil {
+		m.regexCache = make(map[string]*regexp.Regexp)
+	}
 	m.regexCache[pattern] = compiled
 	return compiled, nil
 }
 
 // matchWildcard 通配符路径匹配 (REQ-P1-03 支持标准 glob 语义如 /api/*/users 与 /files/*)
 func (m *Manager) matchWildcard(path, pattern string) bool {
-	m.mu.RLock()
+	m.regexMu.RLock()
 	regex, exists := m.regexCache[pattern]
-	m.mu.RUnlock()
+	m.regexMu.RUnlock()
 
 	if exists && regex != nil {
 		return regex.MatchString(path)
@@ -623,9 +632,12 @@ func (m *Manager) matchWildcard(path, pattern string) bool {
 		return false
 	}
 
-	m.mu.Lock()
+	m.regexMu.Lock()
+	if m.regexCache == nil {
+		m.regexCache = make(map[string]*regexp.Regexp)
+	}
 	m.regexCache[pattern] = compiled
-	m.mu.Unlock()
+	m.regexMu.Unlock()
 
 	return compiled.MatchString(path)
 }

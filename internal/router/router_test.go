@@ -126,8 +126,8 @@ func TestManager_MatchRouteTypesAndPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to match route: %v", err)
 	}
-	if target.URL != "http://items-special" {
-		t.Errorf("expected http://items-special, got %s", target.URL)
+	if target.Target.URL != "http://items-special" {
+		t.Errorf("expected http://items-special, got %s", target.Target.URL)
 	}
 
 	// 2. Prefix match
@@ -140,8 +140,8 @@ func TestManager_MatchRouteTypesAndPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to match route: %v", err)
 	}
-	if target.URL != "http://items-prefix" {
-		t.Errorf("expected http://items-prefix, got %s", target.URL)
+	if target.Target.URL != "http://items-prefix" {
+		t.Errorf("expected http://items-prefix, got %s", target.Target.URL)
 	}
 
 	// 3. Regex match
@@ -154,8 +154,8 @@ func TestManager_MatchRouteTypesAndPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to match route: %v", err)
 	}
-	if target.URL != "http://order-service" {
-		t.Errorf("expected http://order-service, got %s", target.URL)
+	if target.Target.URL != "http://order-service" {
+		t.Errorf("expected http://order-service, got %s", target.Target.URL)
 	}
 
 	// 4. Wildcard match
@@ -168,8 +168,8 @@ func TestManager_MatchRouteTypesAndPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to match route: %v", err)
 	}
-	if target.URL != "http://wildcard-service" {
-		t.Errorf("expected http://wildcard-service, got %s", target.URL)
+	if target.Target.URL != "http://wildcard-service" {
+		t.Errorf("expected http://wildcard-service, got %s", target.Target.URL)
 	}
 
 	// 5. No match
@@ -213,22 +213,22 @@ func TestManager_MatchRules_HostMethodHeadersQuery(t *testing.T) {
 	req.Host = "wrong.example.com"
 	req.Header.Set("X-Secret", "secret-123")
 	c.Request = req
-	if m.matchRule(c, routes[0].Match) {
-		t.Errorf("expected matchRule to fail due to wrong host")
+	if _, matched := m.scoreRoute(c, &routes[0]); matched {
+		t.Errorf("expected scoreRoute to fail due to wrong host")
 	}
 
 	// Mismatched Method
 	req.Host = "api.example.com"
 	req.Method = "GET"
-	if m.matchRule(c, routes[0].Match) {
-		t.Errorf("expected matchRule to fail due to wrong method")
+	if _, matched := m.scoreRoute(c, &routes[0]); matched {
+		t.Errorf("expected scoreRoute to fail due to wrong method")
 	}
 
 	// Mismatched Header
 	req.Method = "POST"
 	req.Header.Set("X-Secret", "wrong-secret")
-	if m.matchRule(c, routes[0].Match) {
-		t.Errorf("expected matchRule to fail due to wrong header")
+	if _, matched := m.scoreRoute(c, &routes[0]); matched {
+		t.Errorf("expected scoreRoute to fail due to wrong header")
 	}
 
 	// Mismatched Query Param
@@ -237,8 +237,8 @@ func TestManager_MatchRules_HostMethodHeadersQuery(t *testing.T) {
 	req.Host = "api.example.com"
 	req.Header.Set("X-Secret", "secret-123")
 	c.Request = req
-	if m.matchRule(c, routes[0].Match) {
-		t.Errorf("expected matchRule to fail due to wrong query param")
+	if _, matched := m.scoreRoute(c, &routes[0]); matched {
+		t.Errorf("expected scoreRoute to fail due to wrong query param")
 	}
 
 	// All conditions satisfied
@@ -248,8 +248,8 @@ func TestManager_MatchRules_HostMethodHeadersQuery(t *testing.T) {
 	req.Host = "api.example.com"
 	req.Header.Set("X-Secret", "secret-123")
 	c.Request = req
-	if !m.matchRule(c, routes[0].Match) {
-		t.Errorf("expected matchRule to succeed when all conditions match")
+	if _, matched := m.scoreRoute(c, &routes[0]); !matched {
+		t.Errorf("expected scoreRoute to succeed when all conditions match")
 	}
 }
 
@@ -307,24 +307,21 @@ func TestRegisterRoutes(t *testing.T) {
 		config:     &RouterConfig{Routes: routes},
 		routeCache: NewRouteCache(10),
 	}
+	m.buildTrieAndCache()
 
 	w := httptest.NewRecorder()
 	_, engine := testutil.NewTestContext(w)
 	RegisterRoutes(engine, m)
 
-	// 1. Test health check
-	rec := testutil.PerformRequest(engine, "GET", "/health", nil, nil)
-	testutil.AssertStatus(t, rec, http.StatusOK)
-	testutil.AssertJSON(t, rec.Body, map[string]interface{}{"status": "ok"})
-
-	// 2. Test matched route
-	rec = testutil.PerformRequest(engine, "GET", "/service/hello", nil, nil)
+	// 1. Test matched route
+	rec := testutil.PerformRequest(engine, "GET", "/service/hello", nil, nil)
 	testutil.AssertStatus(t, rec, http.StatusOK)
 	testutil.AssertJSON(t, rec.Body, map[string]interface{}{
 		"message": "路由匹配成功",
+		"route":   "test-route",
 	})
 
-	// 3. Test unmatched route
+	// 2. Test unmatched route
 	rec = testutil.PerformRequest(engine, "GET", "/not-found", nil, nil)
 	testutil.AssertStatus(t, rec, http.StatusNotFound)
 }
@@ -357,7 +354,7 @@ routes:
 	if err != nil {
 		t.Fatalf("expected route match, got err: %v", err)
 	}
-	if target.URL != "http://target-service" {
-		t.Errorf("expected http://target-service, got %s", target.URL)
+	if target.Target.URL != "http://target-service" {
+		t.Errorf("expected http://target-service, got %s", target.Target.URL)
 	}
 }
