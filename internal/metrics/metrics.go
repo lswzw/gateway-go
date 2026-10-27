@@ -62,6 +62,33 @@ var (
 		},
 		[]string{"version"},
 	)
+
+	// AuthCacheHitsTotal 认证结果本地缓存命中次数（每副本独立计数）
+	AuthCacheHitsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gateway_auth_cache_hits_total",
+			Help: "Total number of interface_auth cache hits (local per replica)",
+		},
+		[]string{"route"},
+	)
+
+	// AuthCacheMissesTotal 认证结果本地缓存未命中次数
+	AuthCacheMissesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gateway_auth_cache_misses_total",
+			Help: "Total number of interface_auth cache misses (local per replica)",
+		},
+		[]string{"route"},
+	)
+
+	// AuthUpstreamCallsTotal 对认证服务的实际外呼次数（result: ok/deny/error/open）
+	AuthUpstreamCallsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "gateway_auth_upstream_calls_total",
+			Help: "Total number of calls to the external auth service by result",
+		},
+		[]string{"route", "result"},
+	)
 )
 
 func init() {
@@ -80,6 +107,9 @@ func Register(r prometheus.Registerer) {
 		CircuitOpenTotal,
 		ReloadTotal,
 		ConfigVersion,
+		AuthCacheHitsTotal,
+		AuthCacheMissesTotal,
+		AuthUpstreamCallsTotal,
 	}
 	for _, c := range collectors {
 		if err := r.Register(c); err != nil {
@@ -158,4 +188,34 @@ func Reset() {
 	CircuitOpenTotal.Reset()
 	ReloadTotal.Reset()
 	ConfigVersion.Reset()
+	AuthCacheHitsTotal.Reset()
+	AuthCacheMissesTotal.Reset()
+	AuthUpstreamCallsTotal.Reset()
+}
+
+// RecordAuthCacheHit 记录认证缓存命中
+func RecordAuthCacheHit(route string) {
+	if route == "" {
+		route = "unknown"
+	}
+	AuthCacheHitsTotal.WithLabelValues(route).Inc()
+}
+
+// RecordAuthCacheMiss 记录认证缓存未命中
+func RecordAuthCacheMiss(route string) {
+	if route == "" {
+		route = "unknown"
+	}
+	AuthCacheMissesTotal.WithLabelValues(route).Inc()
+}
+
+// RecordAuthUpstreamCall 记录对认证服务的实际外呼（result: ok/deny/error/open）
+func RecordAuthUpstreamCall(route, result string) {
+	if route == "" {
+		route = "unknown"
+	}
+	if result == "" {
+		result = "unknown"
+	}
+	AuthUpstreamCallsTotal.WithLabelValues(route, result).Inc()
 }

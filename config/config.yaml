@@ -116,6 +116,11 @@ plugins:
       enabled: true
       order: 900
       config:
+        # 认证结果本地缓存（进程内，不跨副本共享）：0 = 关闭，每请求外呼认证服务。
+        # 该值同时是"令牌被撤销后最长仍可能放行"的时间上界，属安全旋钮。
+        cache_ttl: 30
+        # 缓存条目上限，应 ≥ 峰值活跃令牌数 × 1.5；过小会导致 LRU 抖动、命中率趋零
+        cache_max_entries: 20000
         consumers:
           auth_api: "/auth/realms/paas/protocol/openid-connect/unauthorized"
           host: "172.17.0.2:80"
