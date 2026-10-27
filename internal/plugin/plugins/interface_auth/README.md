@@ -24,10 +24,17 @@ graph TD
 
 | 名称                | 数据类型           | 必填 | 默认值 | 描述                       |
 |---------------------|------------------|------|--------|----------------------------|
-| white_interfaces    | array of string  | 是   | -      | 白名单接口，支持通配符*     |
+| white_interfaces    | array of string  | 否   | []     | 白名单接口，支持通配符*     |
 | consumers           | object           | 是   | -      | 鉴权服务配置               |
 | consumers.host      | string           | 是   | -      | 认证服务主机地址           |
 | consumers.auth_api  | string           | 是   | -      | 认证服务API路径            |
+| consumers.auth_mode | string           | 否   | http_status | 认证模式：`http_status` (2xx通过, 401/403拒绝) 或 `legacy_unauthorized_bool` (响应体"false"判定通过) |
+| cache_ttl           | int              | 否   | 0      | 认证结果本地缓存 TTL（秒），0 表示不缓存 |
+
+## 五、安全与标准协议改造 (REQ-P1-05)
+1. **Token 传递规范**：Token 统一由请求头 `Authorization: Bearer <token>` 传递至外部认证服务，严禁将 Token 拼接到 URL 路径中。
+2. **认证结果判定**：默认以外部认证服务 HTTP 状态码（2xx 放行，401/403 拒绝）判定；兼容模式 `legacy_unauthorized_bool` 支持历史 PaaS 接口读取响应体 `"false"` 判定为通过。
+3. **响应读取上限**：外部认证响应体读取上限强制设为 4KB（`io.LimitReader`），防御恶意大响应攻击。
 
 ## 五、配置示例
 ```yaml

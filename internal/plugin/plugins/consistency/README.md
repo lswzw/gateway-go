@@ -21,15 +21,20 @@
 
 | 名称                | 数据类型         | 必填 | 默认值         | 描述                         |
 |---------------------|----------------|------|----------------|------------------------------|
-| algorithm           | string         | 否   | hmac-sha256    | 签名算法                     |
-| secret              | string         | 是   | -              | 密钥                         |
+| algorithm           | string         | 否   | hmac-sha256    | 签名算法（hmac-sha256, rsa, ecdsa, ed25519；禁用 md5） |
+| secret              | string         | 否   | -              | HMAC 密钥                    |
+| public_key          | string         | 否   | -              | 验签公钥 PEM（用于 RSA、ECDSA、Ed25519） |
 | fields              | array of string| 是   | -              | 参与签名的字段               |
 | signature_field     | string         | 否   | X-Signature    | 签名头字段                   |
-| timestamp_field     | string         | 否   | X-Timestamp    | 时间戳字段                   |
-| nonce_field         | string         | 否   | X-Nonce        | 随机数字段                   |
 | timestamp_validity  | int            | 否   | 300            | 时间戳有效期（秒）            |
-| skip_paths          | array of string| 否   | []             | 跳过的路径                   |
-| skip_methods        | array of string| 否   | []             | 跳过的HTTP方法               |
+| max_nonces          | int            | 否   | 10000          | 已用 Nonce 缓存上限，防内存泄露 |
+| check_response      | bool           | 否   | false          | 是否校验响应签名              |
+
+## 五、安全加固规范 (REQ-P1-05)
+1. **防时序攻击**：所有签名比对均采用 `hmac.Equal` 常量时间比对。
+2. **真实验签**：RSA/ECDSA/Ed25519 采用真实公钥对客户端传来的 `X-Signature` 进行数字签名验证。
+3. **算法安全**：彻底禁用 MD5 散列算法。
+4. **内存与防重放**：`max_nonces` 限制已记录随机数的容量上限，后台独立协程按 30 秒周期自动清理过期 Nonce。
 
 ## 五、配置示例
 

@@ -15,6 +15,10 @@ server:
   read_timeout: "60s"
   write_timeout: "60s"
   max_header_bytes: 1048576
+  max_body_bytes: 1048576 # 默认 1MB，超限返回 413
+  tls:
+    cert_file: "" # 证书文件路径（可选；生产环境建议由前置 LB/Nginx 终止 TLS）
+    key_file: ""  # 私钥文件路径（可选）
 
 # 日志配置
 log:
@@ -167,7 +171,14 @@ routes:
 | port | int | 8080 | 服务器监听端口 |
 | read_timeout | string | 60s | 读取超时时间 |
 | write_timeout | string | 60s | 写入超时时间 |
-| max_header_bytes | int | 1048576 | 最大请求头大小 |
+| max_header_bytes | int | 1048576 | 最大请求头大小（字节） |
+| max_body_bytes | int64 | 1048576 | 最大请求体大小（字节，默认 1MB），超限直接返回统一 HTTP 413 JSON |
+| tls.cert_file | string | "" | TLS 证书文件路径（可选，未配置时使用普通 HTTP） |
+| tls.key_file | string | "" | TLS 私钥文件路径（可选） |
+
+> [!IMPORTANT]
+> **TLS / HTTPS 终结规范**：
+> 生产部署中，推荐通过前置负载均衡（LB）或前置 Nginx 反向代理层终止 TLS 并分发流量至网关业务端口；若需网关直面外网，必须配置 `server.tls.cert_file` 与 `server.tls.key_file` 启用内置 TLS。
 
 > 日志相关请统一通过 log 配置项管理，调试与生产日志级别请设置 log.level。
 

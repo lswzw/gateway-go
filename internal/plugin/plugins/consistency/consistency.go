@@ -6,14 +6,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/hmac"
-	"crypto/md5"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"strconv"
@@ -41,38 +42,37 @@ const (
 // ConsistencyPlugin 一致性校验插件
 type ConsistencyPlugin struct {
 	*core.BasePlugin
-	config *Config
-	// 用于存储已使用的 nonce
-	usedNonces sync.Map
-	stopChan   chan struct{}
-	stopOnce   sync.Once
-	running    bool
-	mu         sync.Mutex
+	config      *Config
+	usedNonces  map[string]time.Time
+	nonceMu     sync.RWMutex
+	stopCleanup chan struct{}
 }
 
 // Config 插件配置
 type Config struct {
 	// 是否启用插件
-	Enabled bool `yaml:"enabled"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
 	// 校验算法
-	Algorithm Algorithm `yaml:"algorithm"`
-	// 密钥
-	Secret string `yaml:"secret"`
-	// 公钥（用于 RSA、ECDSA、Ed25519）
-	PublicKey string `yaml:"public_key"`
+	Algorithm Algorithm `yaml:"algorithm" json:"algorithm"`
+	// 密钥 (用于 HMAC)
+	Secret string `yaml:"secret" json:"secret"`
+	// 公钥 (用于 RSA、ECDSA、Ed25519)
+	PublicKey string `yaml:"public_key" json:"public_key"`
 	// 需要校验的字段
-	Fields []string `yaml:"fields"`
+	Fields []string `yaml:"fields" json:"fields"`
 	// 签名字段名
-	SignatureField string `yaml:"signature_field"`
+	SignatureField string `yaml:"signature_field" json:"signature_field"`
 	// 是否校验响应
-	CheckResponse bool `yaml:"check_response"`
+	CheckResponse bool `yaml:"check_response" json:"check_response"`
 	// 时间戳有效期（秒）
-	TimestampValidity int64 `yaml:"timestamp_validity"`
+	TimestampValidity int64 `yaml:"timestamp_validity" json:"timestamp_validity"`
+	// Nonce 容量上限（默认 10000）
+	MaxNonces int `yaml:"max_nonces" json:"max_nonces"`
 }
 
 // New 创建一致性校验插件实例
 func New() *ConsistencyPlugin {
-	return &ConsistencyPlugin{
+	p := &ConsistencyPlugin{
 		BasePlugin: core.NewBasePlugin("consistency", 15, nil),
 		config: &Config{
 			Enabled:           true,
@@ -80,23 +80,18 @@ func New() *ConsistencyPlugin {
 			SignatureField:    "X-Signature",
 			Fields:            []string{"timestamp", "nonce"},
 			CheckResponse:     false,
-			TimestampValidity: 300, // 默认 5 分钟
+			TimestampValidity: 300,   // 默认 5 分钟
+			MaxNonces:         10000, // 默认最大 10000 个 nonce
 		},
-		stopChan: make(chan struct{}),
+		usedNonces: make(map[string]time.Time),
 	}
+	p.startCleanupTicker()
+	return p
 }
 
 // Init 初始化插件 (幂等且可重入 REQ-P1-02)
 func (p *ConsistencyPlugin) Init(config interface{}) error {
-	p.mu.Lock()
-	if p.running && p.stopChan != nil {
-		close(p.stopChan)
-		p.running = false
-	}
-	p.stopChan = make(chan struct{})
-	p.stopOnce = sync.Once{}
-	p.running = true
-	p.mu.Unlock()
+	_ = p.Stop()
 
 	if config == nil {
 		return nil
@@ -124,8 +119,10 @@ func (p *ConsistencyPlugin) Init(config interface{}) error {
 	if fields, ok := configMap["fields"].([]interface{}); ok {
 		p.config.Fields = make([]string, len(fields))
 		for i, field := range fields {
-			p.config.Fields[i] = field.(string)
+			p.config.Fields[i] = fmt.Sprintf("%v", field)
 		}
+	} else if fields, ok := configMap["fields"].([]string); ok {
+		p.config.Fields = fields
 	}
 	if signatureField, ok := configMap["signature_field"].(string); ok {
 		p.config.SignatureField = signatureField
@@ -133,10 +130,69 @@ func (p *ConsistencyPlugin) Init(config interface{}) error {
 	if checkResponse, ok := configMap["check_response"].(bool); ok {
 		p.config.CheckResponse = checkResponse
 	}
-	if timestampValidity, ok := configMap["timestamp_validity"].(int64); ok {
-		p.config.TimestampValidity = timestampValidity
+	if tv, ok := configMap["timestamp_validity"]; ok {
+		switch v := tv.(type) {
+		case int64:
+			p.config.TimestampValidity = v
+		case int:
+			p.config.TimestampValidity = int64(v)
+		case float64:
+			p.config.TimestampValidity = int64(v)
+		}
+	}
+	if mn, ok := configMap["max_nonces"]; ok {
+		switch v := mn.(type) {
+		case int:
+			p.config.MaxNonces = v
+		case int64:
+			p.config.MaxNonces = int(v)
+		case float64:
+			p.config.MaxNonces = int(v)
+		}
 	}
 
+	if p.config.MaxNonces <= 0 {
+		p.config.MaxNonces = 10000
+	}
+
+	p.startCleanupTicker()
+	return nil
+}
+
+// startCleanupTicker 启动定期清理过期 nonce 的后台任务
+func (p *ConsistencyPlugin) startCleanupTicker() {
+	p.nonceMu.Lock()
+	defer p.nonceMu.Unlock()
+
+	if p.stopCleanup != nil {
+		return
+	}
+	stopChan := make(chan struct{})
+	p.stopCleanup = stopChan
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.cleanupExpiredNonces()
+			case <-stopChan:
+				return
+			}
+		}
+	}()
+}
+
+// Stop 停止插件并释放资源
+func (p *ConsistencyPlugin) Stop() error {
+	p.nonceMu.Lock()
+	defer p.nonceMu.Unlock()
+
+	if p.stopCleanup != nil {
+		close(p.stopCleanup)
+		p.stopCleanup = nil
+	}
+	p.usedNonces = make(map[string]time.Time)
 	return nil
 }
 
@@ -147,8 +203,9 @@ func (p *ConsistencyPlugin) Execute(c *gin.Context) error {
 	}
 
 	// 校验请求
-	if err := p.checkRequest(c); err != nil {
-		response.RespondError(c, http.StatusBadRequest, err.Error(), response.GetRequestID(c))
+	statusCode, err := p.checkRequest(c)
+	if err != nil {
+		response.RespondError(c, statusCode, err.Error(), response.GetRequestID(c))
 		return nil
 	}
 
@@ -165,34 +222,39 @@ func (p *ConsistencyPlugin) Execute(c *gin.Context) error {
 	return nil
 }
 
-// checkRequest 校验请求
-func (p *ConsistencyPlugin) checkRequest(c *gin.Context) error {
+// checkRequest 校验请求，返回状态码与错误
+func (p *ConsistencyPlugin) checkRequest(c *gin.Context) (int, error) {
+	// MD5 不安全，默认禁止
+	if p.config.Algorithm == AlgorithmMD5 {
+		return http.StatusBadRequest, fmt.Errorf("insecure algorithm: md5 is disallowed")
+	}
+
 	// 获取签名
 	signature := c.GetHeader(p.config.SignatureField)
 	if signature == "" {
-		return fmt.Errorf("missing signature")
+		return http.StatusBadRequest, fmt.Errorf("missing signature")
 	}
 
 	// 获取时间戳
 	timestamp := c.GetHeader("timestamp")
 	if timestamp == "" {
-		return fmt.Errorf("missing timestamp")
+		return http.StatusBadRequest, fmt.Errorf("missing timestamp")
 	}
 
 	// 验证时间戳
-	if err := p.validateTimestamp(timestamp); err != nil {
-		return err
+	if code, err := p.validateTimestamp(timestamp); err != nil {
+		return code, err
 	}
 
 	// 获取 nonce
 	nonce := c.GetHeader("nonce")
 	if nonce == "" {
-		return fmt.Errorf("missing nonce")
+		return http.StatusBadRequest, fmt.Errorf("missing nonce")
 	}
 
-	// 验证 nonce 是否已使用
-	if !p.validateNonce(nonce) {
-		return fmt.Errorf("nonce 已使用")
+	// 验证 nonce 是否已使用（原子检查并预记录）
+	if code, err := p.validateAndRecordNonce(nonce); err != nil {
+		return code, err
 	}
 
 	// 获取需要校验的字段值
@@ -200,191 +262,303 @@ func (p *ConsistencyPlugin) checkRequest(c *gin.Context) error {
 	for _, field := range p.config.Fields {
 		value := c.GetHeader(field)
 		if value == "" {
-			return fmt.Errorf("missing required field: %s", field)
+			p.deleteNonce(nonce)
+			return http.StatusBadRequest, fmt.Errorf("missing required field: %s", field)
 		}
 		values = append(values, value)
 	}
 
-	// 计算签名
-	calculatedSignature, err := p.calculateSignature(values)
-	if err != nil {
-		return err
+	// 拼接待验签内容
+	content := strings.Join(values, "&")
+
+	// 验证签名
+	if err := p.verifySignature(content, signature); err != nil {
+		p.deleteNonce(nonce)
+		return http.StatusUnauthorized, fmt.Errorf("invalid signature")
 	}
 
-	// 比较签名
-	if calculatedSignature != signature {
-		return fmt.Errorf("invalid signature")
-	}
-
-	// 记录已使用的 nonce
-	p.usedNonces.Store(nonce, time.Now())
-
-	return nil
+	return 0, nil
 }
 
 // validateTimestamp 验证时间戳
-func (p *ConsistencyPlugin) validateTimestamp(timestampStr string) error {
+func (p *ConsistencyPlugin) validateTimestamp(timestampStr string) (int, error) {
 	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid timestamp format")
+		return http.StatusBadRequest, fmt.Errorf("invalid timestamp format")
+	}
+
+	// 兼容毫秒级时间戳 (>= 13 位)
+	if timestamp > 1e11 {
+		timestamp = timestamp / 1000
 	}
 
 	now := time.Now().Unix()
 	if math.Abs(float64(now-timestamp)) > float64(p.config.TimestampValidity) {
-		return fmt.Errorf("timestamp expired")
+		return http.StatusUnauthorized, fmt.Errorf("timestamp expired")
 	}
 
-	return nil
+	return 0, nil
 }
 
-// validateNonce 验证 nonce 是否已使用
-func (p *ConsistencyPlugin) validateNonce(nonce string) bool {
-	// 检查 nonce 是否已使用
-	if _, exists := p.usedNonces.Load(nonce); exists {
-		return false
+// validateAndRecordNonce 验证并记录 nonce
+func (p *ConsistencyPlugin) validateAndRecordNonce(nonce string) (int, error) {
+	p.nonceMu.Lock()
+	defer p.nonceMu.Unlock()
+
+	now := time.Now()
+	validity := time.Duration(p.config.TimestampValidity) * time.Second
+
+	// 若 nonce 已存在且未过期，判定为重放攻击
+	if t, exists := p.usedNonces[nonce]; exists {
+		if now.Sub(t) <= validity {
+			return http.StatusUnauthorized, fmt.Errorf("nonce 已使用")
+		}
 	}
 
-	// 清理过期的 nonce
-	p.cleanupExpiredNonces()
+	// 检查容量限制，若达到上限先做一次过期清理
+	if len(p.usedNonces) >= p.config.MaxNonces {
+		for k, t := range p.usedNonces {
+			if now.Sub(t) > validity {
+				delete(p.usedNonces, k)
+			}
+		}
+	}
 
-	return true
+	// 清理后若仍达上限，拒绝新增并返回错误
+	if len(p.usedNonces) >= p.config.MaxNonces {
+		return http.StatusTooManyRequests, fmt.Errorf("nonce storage capacity reached")
+	}
+
+	// 记录 nonce
+	p.usedNonces[nonce] = now
+	return 0, nil
+}
+
+// deleteNonce 回滚未验签通过的 nonce
+func (p *ConsistencyPlugin) deleteNonce(nonce string) {
+	p.nonceMu.Lock()
+	defer p.nonceMu.Unlock()
+	delete(p.usedNonces, nonce)
 }
 
 // cleanupExpiredNonces 清理过期的 nonce
 func (p *ConsistencyPlugin) cleanupExpiredNonces() {
+	p.nonceMu.Lock()
+	defer p.nonceMu.Unlock()
+
 	now := time.Now()
-	p.usedNonces.Range(func(key, value interface{}) bool {
-		if timestamp, ok := value.(time.Time); ok {
-			if now.Sub(timestamp) > time.Duration(p.config.TimestampValidity)*time.Second {
-				p.usedNonces.Delete(key)
-			}
+	validity := time.Duration(p.config.TimestampValidity) * time.Second
+	for key, value := range p.usedNonces {
+		if now.Sub(value) > validity {
+			delete(p.usedNonces, key)
 		}
-		return true
-	})
+	}
 }
 
-// calculateSignature 计算签名
-func (p *ConsistencyPlugin) calculateSignature(values []string) (string, error) {
-	// 拼接字段值
-	content := strings.Join(values, "&")
-
+// verifySignature 校验签名
+func (p *ConsistencyPlugin) verifySignature(content string, sigStr string) error {
 	switch p.config.Algorithm {
-	case AlgorithmHMACSHA256:
-		h := hmac.New(sha256.New, []byte(p.config.Secret))
-		h.Write([]byte(content))
-		return hex.EncodeToString(h.Sum(nil)), nil
-	case AlgorithmMD5:
-		h := md5.New()
-		h.Write([]byte(content))
-		return hex.EncodeToString(h.Sum(nil)), nil
+	case AlgorithmHMACSHA256, "":
+		return p.verifyHMAC(content, sigStr)
 	case AlgorithmRSA:
-		return p.calculateRSASignature(content)
+		return p.verifyRSA(content, sigStr)
 	case AlgorithmECDSA:
-		return p.calculateECDSASignature(content)
+		return p.verifyECDSA(content, sigStr)
 	case AlgorithmEd25519:
-		return p.calculateEd25519Signature(content)
+		return p.verifyEd25519(content, sigStr)
+	case AlgorithmMD5:
+		return fmt.Errorf("insecure algorithm: md5 is disallowed")
 	default:
-		return "", fmt.Errorf("unsupported algorithm: %s", p.config.Algorithm)
+		return fmt.Errorf("unsupported algorithm: %s", p.config.Algorithm)
 	}
 }
 
-// calculateRSASignature 计算 RSA 签名
-func (p *ConsistencyPlugin) calculateRSASignature(content string) (string, error) {
+// verifyHMAC 使用常量时间比较校验 HMAC-SHA256 签名，防御时序攻击
+func (p *ConsistencyPlugin) verifyHMAC(content string, sigStr string) error {
+	h := hmac.New(sha256.New, []byte(p.config.Secret))
+	h.Write([]byte(content))
+	expectedMAC := h.Sum(nil)
+	expectedHex := hex.EncodeToString(expectedMAC)
+
+	// 支持客户端传入十六进制签名
+	if sigBytes, err := hex.DecodeString(sigStr); err == nil && len(sigBytes) > 0 {
+		if hmac.Equal(expectedMAC, sigBytes) {
+			return nil
+		}
+	}
+
+	// 支持客户端传入十六进制字符串，使用 hmac.Equal 比较字节序列
+	if hmac.Equal([]byte(strings.ToLower(expectedHex)), []byte(strings.ToLower(sigStr))) {
+		return nil
+	}
+
+	return fmt.Errorf("invalid signature")
+}
+
+// decodeSignatureBytes 解码十六进制或 Base64 格式的签名
+func decodeSignatureBytes(sigStr string) ([]byte, error) {
+	sigStr = strings.TrimSpace(sigStr)
+	// 尝试十六进制解码
+	if b, err := hex.DecodeString(sigStr); err == nil && len(b) > 0 {
+		return b, nil
+	}
+	// 尝试标准 Base64 解码
+	if b, err := base64.StdEncoding.DecodeString(sigStr); err == nil && len(b) > 0 {
+		return b, nil
+	}
+	// 尝试 URL Safe Base64 解码
+	if b, err := base64.URLEncoding.DecodeString(sigStr); err == nil && len(b) > 0 {
+		return b, nil
+	}
+	return nil, fmt.Errorf("signature must be hex or base64 encoded")
+}
+
+// parsePublicKeyPEM 解析公钥 PEM 块为 DER 字节
+func parsePublicKeyPEM(keyPEM string) ([]byte, error) {
+	block, _ := pem.Decode([]byte(keyPEM))
+	if block != nil {
+		return block.Bytes, nil
+	}
+	// 尝试直接作为 Base64 DER 解析
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyPEM))
+	if err == nil && len(b) > 0 {
+		return b, nil
+	}
+	return nil, fmt.Errorf("failed to parse public key PEM")
+}
+
+// verifyRSA 校验客户端 RSA 签名（真正使用公钥验证，防御伪造）
+func (p *ConsistencyPlugin) verifyRSA(content string, sigStr string) error {
 	if p.config.PublicKey == "" {
-		return "", fmt.Errorf("RSA public key not configured")
+		return fmt.Errorf("RSA public key not configured")
 	}
 
-	// 解析公钥
-	block, _ := pem.Decode([]byte(p.config.PublicKey))
-	if block == nil {
-		return "", fmt.Errorf("failed to parse RSA public key")
-	}
-
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	derBytes, err := parsePublicKeyPEM(p.config.PublicKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse RSA public key: %v", err)
+		return err
+	}
+
+	pub, err := x509.ParsePKIXPublicKey(derBytes)
+	if err != nil {
+		// 尝试 PKCS#1 格式
+		pub, err = x509.ParsePKCS1PublicKey(derBytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse RSA public key: %v", err)
+		}
 	}
 
 	rsaPub, ok := pub.(*rsa.PublicKey)
 	if !ok {
-		return "", fmt.Errorf("not an RSA public key")
+		return fmt.Errorf("not an RSA public key")
 	}
 
-	// 计算签名
-	h := sha256.New()
-	h.Write([]byte(content))
-	hashed := h.Sum(nil)
-
-	// 验证签名
-	err = rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, hashed, []byte(content))
+	sigBytes, err := decodeSignatureBytes(sigStr)
 	if err != nil {
-		return "", fmt.Errorf("failed to verify RSA signature: %v", err)
+		return fmt.Errorf("invalid signature format: %v", err)
 	}
 
-	return hex.EncodeToString(hashed), nil
+	hashed := sha256.Sum256([]byte(content))
+
+	// 优先以 PKCS#1 v1.5 格式验签
+	if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, hashed[:], sigBytes); err == nil {
+		return nil
+	}
+
+	// 兼容以 PSS 格式验签
+	if err := rsa.VerifyPSS(rsaPub, crypto.SHA256, hashed[:], sigBytes, nil); err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("invalid signature")
 }
 
-// calculateECDSASignature 计算 ECDSA 签名
-func (p *ConsistencyPlugin) calculateECDSASignature(content string) (string, error) {
+// verifyECDSA 校验客户端 ECDSA 签名
+func (p *ConsistencyPlugin) verifyECDSA(content string, sigStr string) error {
 	if p.config.PublicKey == "" {
-		return "", fmt.Errorf("ECDSA public key not configured")
+		return fmt.Errorf("ECDSA public key not configured")
 	}
 
-	// 解析公钥
-	block, _ := pem.Decode([]byte(p.config.PublicKey))
-	if block == nil {
-		return "", fmt.Errorf("failed to parse ECDSA public key")
-	}
-
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	derBytes, err := parsePublicKeyPEM(p.config.PublicKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse ECDSA public key: %v", err)
+		return err
 	}
 
-	_, ok := pub.(*ecdsa.PublicKey)
+	pub, err := x509.ParsePKIXPublicKey(derBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse ECDSA public key: %v", err)
+	}
+
+	ecdsaPub, ok := pub.(*ecdsa.PublicKey)
 	if !ok {
-		return "", fmt.Errorf("not an ECDSA public key")
+		return fmt.Errorf("not an ECDSA public key")
 	}
 
-	// 计算签名
-	h := sha256.New()
-	h.Write([]byte(content))
-	hashed := h.Sum(nil)
+	sigBytes, err := decodeSignatureBytes(sigStr)
+	if err != nil {
+		return fmt.Errorf("invalid signature format: %v", err)
+	}
 
-	// 由于我们只有公钥，这里只能验证签名
-	// 实际签名应该在客户端使用私钥完成
-	return hex.EncodeToString(hashed), nil
+	hashed := sha256.Sum256([]byte(content))
+
+	// 尝试 ASN.1 DER 验签
+	if ecdsa.VerifyASN1(ecdsaPub, hashed[:], sigBytes) {
+		return nil
+	}
+
+	// 尝试 raw (r, s) 验签
+	if len(sigBytes) > 0 && len(sigBytes)%2 == 0 {
+		half := len(sigBytes) / 2
+		r := new(big.Int).SetBytes(sigBytes[:half])
+		s := new(big.Int).SetBytes(sigBytes[half:])
+		if ecdsa.Verify(ecdsaPub, hashed[:], r, s) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("invalid signature")
 }
 
-// calculateEd25519Signature 计算 Ed25519 签名
-func (p *ConsistencyPlugin) calculateEd25519Signature(content string) (string, error) {
+// verifyEd25519 校验客户端 Ed25519 签名
+func (p *ConsistencyPlugin) verifyEd25519(content string, sigStr string) error {
 	if p.config.PublicKey == "" {
-		return "", fmt.Errorf("Ed25519 public key not configured")
+		return fmt.Errorf("Ed25519 public key not configured")
 	}
 
-	// 解析公钥
-	block, _ := pem.Decode([]byte(p.config.PublicKey))
-	if block == nil {
-		return "", fmt.Errorf("failed to parse Ed25519 public key")
+	var edPub ed25519.PublicKey
+	derBytes, err := parsePublicKeyPEM(p.config.PublicKey)
+	if err == nil {
+		pub, parseErr := x509.ParsePKIXPublicKey(derBytes)
+		if parseErr == nil {
+			var ok bool
+			edPub, ok = pub.(ed25519.PublicKey)
+			if !ok {
+				return fmt.Errorf("not an Ed25519 public key")
+			}
+		}
 	}
 
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if edPub == nil {
+		// 尝试直接作为 32 字节原始公钥 (hex 或 base64)
+		cleanKey := strings.TrimSpace(p.config.PublicKey)
+		if b, err := hex.DecodeString(cleanKey); err == nil && len(b) == ed25519.PublicKeySize {
+			edPub = b
+		} else if b, err := base64.StdEncoding.DecodeString(cleanKey); err == nil && len(b) == ed25519.PublicKeySize {
+			edPub = b
+		} else {
+			return fmt.Errorf("failed to parse Ed25519 public key")
+		}
+	}
+
+	sigBytes, err := decodeSignatureBytes(sigStr)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse Ed25519 public key: %v", err)
+		return fmt.Errorf("invalid signature format: %v", err)
 	}
 
-	_, ok := pub.(ed25519.PublicKey)
-	if !ok {
-		return "", fmt.Errorf("not an Ed25519 public key")
+	if !ed25519.Verify(edPub, []byte(content), sigBytes) {
+		return fmt.Errorf("invalid signature")
 	}
 
-	// 计算签名
-	// 由于我们只有公钥，这里只能验证签名
-	// 实际签名应该在客户端使用私钥完成
-	h := sha256.New()
-	h.Write([]byte(content))
-	hashed := h.Sum(nil)
-	return hex.EncodeToString(hashed), nil
+	return nil
 }
 
 // responseWriter 响应写入器
@@ -411,18 +585,11 @@ func (w *responseWriter) WriteString(s string) (int, error) {
 func (w *responseWriter) WriteHeader(code int) {
 	// 如果响应成功，校验响应内容
 	if code == http.StatusOK {
-		// 获取响应签名
 		signature := w.Header().Get(w.plugin.config.SignatureField)
 		if signature != "" {
-			// 计算响应签名
-			calculatedSignature, err := w.plugin.calculateSignature([]string{string(w.body)})
+			// 校验响应签名
+			err := w.plugin.verifySignature(string(w.body), signature)
 			if err != nil {
-				w.ResponseWriter.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-
-			// 比较签名
-			if calculatedSignature != signature {
 				w.ResponseWriter.WriteHeader(http.StatusInternalServerError)
 				return
 			}
@@ -450,19 +617,4 @@ func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Pusher 实现 http.Pusher 接口
 func (w *responseWriter) Pusher() http.Pusher {
 	return w.ResponseWriter.(http.Pusher)
-}
-
-// Stop 停止插件 (sync.Once 保护，重复调用安全不 panic REQ-P1-02)
-func (p *ConsistencyPlugin) Stop() error {
-	p.stopOnce.Do(func() {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.running {
-			p.running = false
-			if p.stopChan != nil {
-				close(p.stopChan)
-			}
-		}
-	})
-	return nil
 }
