@@ -578,18 +578,23 @@ gateway hard nofile 65535
 
 ### 2. 应用调优
 
-#### 连接池配置
+#### 上游连接池
 
-```yaml
-server:
-  max_connections: 10000
-  connection_timeout: "30s"
-  idle_timeout: "60s"
+网关到上游的连接池由 `internal/proxy` 统一管理（按路由缓存 `http.Transport`），当前版本**不需要也无法**在 `config.yaml` 中配置，默认值已按峰值并发调优：
 
-middleware:
-  rate_limit:
-    requests_per_second: 1000
-    burst: 2000
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `MaxIdleConns` | 4096 | 所有上游的空闲连接总上限 |
+| `MaxIdleConnsPerHost` | 2048 | 单个上游的空闲连接上限，**必须 ≥ 预估峰值并发** |
+| `IdleConnTimeout` | 90s | 空闲连接回收时间 |
+
+> `MaxIdleConnsPerHost` 小于峰值并发时，超额连接在请求结束后无法回池而被立即关闭，下一次请求只能重新 dial，形成连接 churn：实测 800 并发时网关侧 `TIME_WAIT` 堆到 28,131 个，把本地端口区间耗尽，吞吐从 27k RPS 崩到 2.1k RPS 并出现 502。若单实例并发长期超过 2000，需要同步放大这两个常量并重新编译。
+
+配套内核参数（本地端口回收，必须与连接池同时配置）：
+
+```bash
+sysctl -w net.ipv4.tcp_tw_reuse=1
+sysctl -w net.ipv4.ip_local_port_range="10000 65535"
 ```
 
 ## 备份和恢复

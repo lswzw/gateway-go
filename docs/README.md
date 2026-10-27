@@ -36,12 +36,12 @@
 - **[监控告警](best-practices/monitoring.md)** - 监控和告警配置
 
 ### 📊 性能测试
-- **[性能测试报告](performance-testing.md)** - 完整的压测报告和性能分析
-- **[性能优化方案](performance-optimization.md)** - 具体的代码优化实现方案
+- **[性能测试报告](performance-testing.md)** - 实测吞吐/延迟/资源数据（2026-10），含基准矩阵、高并发拐点与长稳
+- **[性能优化方案](performance-optimization.md)** - 代码优化实现方案，含 2026-10 实测缺陷定位与修复记录
 
 ## 📝 文档更新
 
-- **最后更新**: 2025年06月
+- **最后更新**: 2026年10月
 - **版本**: v1.0.0
 - **维护者**: Gateway-Go 团队
 

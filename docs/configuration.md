@@ -271,14 +271,20 @@ routes:
 
 ### 热重载机制
 
-服务支持配置文件的动态加载：
+网关有两条触发路径，**最终都调用同一个 `ConfigManager.ReloadConfig`**，语义完全一致：
 
-1. **文件监控**：使用 `fsnotify` 监控配置文件变化
-2. **配置解析**：解析新的配置文件
-3. **配置验证**：验证新配置的有效性
-4. **配置更新**：更新运行时配置
-5. **路由重载**：重新注册所有路由
-6. **插件重载**：重新加载插件配置
+1. **信号触发**：`SIGHUP` / `SIGUSR1`（即 `./gateway -s reload`，通过 PID 文件定位进程）
+2. **文件变更触发**：`fsnotify` 监听配置文件所在目录，捕获 `Write` 事件后入队重载
+
+重载采用「快照原子切换」：
+
+1. **配置解析**：解析并校验新配置文件（失败则保留旧配置并返回错误）
+2. **准备阶段**：构建候选快照（独立的路由表、插件管理器与 gin Engine），此时旧快照继续服务，无需停流量
+3. **同步钩子**：执行已注册的 `reloadHooks`
+4. **提交阶段**：原子替换 `atomic.Pointer[Snapshot]`，旧快照延迟 2s 释放以容纳在途请求
+5. **版本更新**：提交配置版本号，`gateway_config_version` 指标同步更新
+
+> **锁纪律**：重载流程不会持有配置状态写锁去执行回调，因此钩子内可以安全调用 `GetConfig()` / `GetVersion()`。历史版本曾因锁重入导致 `-s reload` 后数据面永久卡死（而 `/healthz` 仍返回 200），已在 2026-10 修复，详见[性能优化方案](performance-optimization.md) 第 6.1 节。
 
 ### 配置更新流程
 
@@ -296,26 +302,23 @@ graph TD
     G --> K[保持旧配置]
 ```
 
-### 配置管理API
+### 配置更新方式
 
-提供以下管理API：
+当前版本**没有** `GET /admin/config/*` 之类的配置管理 HTTP 接口；管理端口（`admin.listen`）只提供 `/metrics`、`/healthz`、`/readyz` 三个端点，见[管理 API](api/admin.md)。配置更新通过命令行或文件变更完成：
 
 ```bash
-# 获取当前配置
-GET /admin/config/current
+# 1. 校验配置语法（不启动服务）
+./gateway -c /etc/gateway-go/config.yaml -t
 
-# 重新加载配置
-POST /admin/config/reload
+# 2. 热重载（向 PID 文件中的进程发送 SIGHUP），或直接修改配置文件由 fsnotify 触发
+./gateway -s reload
 
-# 测试配置
-POST /admin/config/test
-
-# 获取配置版本历史
-GET /admin/config/history
-
-# 回滚到指定版本
-POST /admin/config/rollback/{version}
+# 3. 优雅停止 / 立即退出
+./gateway -s stop
+./gateway -s quit
 ```
+
+热重载失败时旧配置继续生效，错误会写入日志并累加 `gateway_reload_total{result="failure"}`。
 
 ## 配置最佳实践
 
