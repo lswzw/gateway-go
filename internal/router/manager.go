@@ -71,6 +71,7 @@ type Manager struct {
 	watcher       *fsnotify.Watcher
 	pluginManager *plugin.Manager
 	regexCache    map[string]*regexp.Regexp
+	regexMu       sync.RWMutex
 	configManager *config.ConfigManager
 	configCenter  *config.ConfigCenter // 保持向后兼容
 
@@ -312,8 +313,10 @@ func (m *Manager) MatchRoute(c *gin.Context) (*TargetService, error) {
 	if m.routeCache != nil {
 		if route, ok := m.routeCache.Get(path); ok {
 			if m.matchRule(c, route.Match) {
-				if err := m.pluginManager.Execute(c, route.Name); err != nil {
-					return nil, err
+				if m.pluginManager != nil {
+					if err := m.pluginManager.Execute(c, route.Name); err != nil {
+						return nil, err
+					}
 				}
 				if route.Match.ABTest != nil && route.Match.ABTest.Enabled {
 					return m.handleABTest(c, route)
@@ -331,8 +334,10 @@ func (m *Manager) MatchRoute(c *gin.Context) (*TargetService, error) {
 				if m.routeCache != nil {
 					m.routeCache.Set(path, route)
 				}
-				if err := m.pluginManager.Execute(c, route.Name); err != nil {
-					return nil, err
+				if m.pluginManager != nil {
+					if err := m.pluginManager.Execute(c, route.Name); err != nil {
+						return nil, err
+					}
 				}
 				if route.Match.ABTest != nil && route.Match.ABTest.Enabled {
 					return m.handleABTest(c, route)
@@ -366,8 +371,10 @@ func (m *Manager) MatchRoute(c *gin.Context) (*TargetService, error) {
 		m.routeCache.Set(path, bestMatch)
 	}
 
-	if err := m.pluginManager.Execute(c, bestMatch.Name); err != nil {
-		return nil, err
+	if m.pluginManager != nil {
+		if err := m.pluginManager.Execute(c, bestMatch.Name); err != nil {
+			return nil, err
+		}
 	}
 
 	if bestMatch.Match.ABTest != nil && bestMatch.Match.ABTest.Enabled {
@@ -433,16 +440,16 @@ func (m *Manager) matchPath(path string, rule RouteMatch) bool {
 
 // getRegex 获取正则表达式
 func (m *Manager) getRegex(pattern string) (*regexp.Regexp, error) {
-	m.mu.RLock()
+	m.regexMu.RLock()
 	regex, exists := m.regexCache[pattern]
-	m.mu.RUnlock()
+	m.regexMu.RUnlock()
 
 	if exists {
 		return regex, nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.regexMu.Lock()
+	defer m.regexMu.Unlock()
 
 	// 双重检查
 	regex, exists = m.regexCache[pattern]

@@ -26,6 +26,7 @@ const (
 type CircuitBreaker struct {
 	state         int32 // CircuitBreakerState
 	halfOpenQuota int32
+	openedAtNano  int64 // 转换为 Open 状态时的时间戳 (纳秒)
 	window        *Window
 	config        map[string]interface{}
 	lastUsed      time.Time // 最后使用时间
@@ -130,6 +131,9 @@ func (p *CircuitBreakerPlugin) GetCircuitBreaker(target string) *CircuitBreaker 
 // SetState 设置熔断器状态
 func (cb *CircuitBreaker) SetState(state CircuitBreakerState) {
 	atomic.StoreInt32(&cb.state, int32(state))
+	if state == StateOpen {
+		atomic.StoreInt64(&cb.openedAtNano, time.Now().UnixNano())
+	}
 }
 
 // getCircuitBreaker 获取或创建熔断器
@@ -206,13 +210,18 @@ func (cb *CircuitBreaker) allowRequest() bool {
 		failureThreshold := cb.config["failure_threshold"].(int)
 		if cb.window.GetFailureRate() >= float64(failureThreshold)/100.0 {
 			atomic.StoreInt32(&cb.state, int32(StateOpen))
+			atomic.StoreInt64(&cb.openedAtNano, time.Now().UnixNano())
 			return false
 		}
 		return true
 	case StateOpen:
 		// 检查是否达到恢复时间
 		recoveryTimeout := cb.config["recovery_timeout"].(int)
-		if time.Since(time.Unix(0, cb.window.getCurrentBucket().timestamp)) >= time.Duration(recoveryTimeout)*time.Second {
+		openedAt := atomic.LoadInt64(&cb.openedAtNano)
+		if openedAt == 0 {
+			openedAt = cb.window.getCurrentBucket().timestamp
+		}
+		if time.Since(time.Unix(0, openedAt)) >= time.Duration(recoveryTimeout)*time.Second {
 			// 尝试转换为半开状态
 			if atomic.CompareAndSwapInt32(&cb.state, int32(StateOpen), int32(StateHalfOpen)) {
 				halfOpenQuota := cb.config["half_open_quota"].(int)
