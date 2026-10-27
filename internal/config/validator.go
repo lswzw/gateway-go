@@ -46,6 +46,10 @@ func validateServerConfig(config *ServerConfig) error {
 		return fmt.Errorf("无效的最大请求头大小: %d", config.MaxHeaderBytes)
 	}
 
+	if config.MaxBodyBytes < 0 {
+		return fmt.Errorf("无效的最大请求体大小: %d (必须 >= 0)", config.MaxBodyBytes)
+	}
+
 	if config.GracefulShutdownTimeout <= 0 {
 		return fmt.Errorf("无效的优雅关闭超时时间: %v", config.GracefulShutdownTimeout)
 	}

@@ -12,9 +12,28 @@ import (
 // Config 总配置结构
 type Config struct {
 	Server  ServerConfig  `yaml:"server" mapstructure:"server"`
+	Admin   AdminConfig   `yaml:"admin" mapstructure:"admin"`
 	Log     LogConfig     `yaml:"log" mapstructure:"log"`
 	Plugins PluginsConfig `yaml:"plugins" mapstructure:"plugins"`
 	Routes  []RouteConfig `yaml:"routes" mapstructure:"routes"`
+}
+
+// AdminConfig 管理端口配置 (REQ-P1-04)
+type AdminConfig struct {
+	Listen string `yaml:"listen" mapstructure:"listen"`
+}
+
+func (a *AdminConfig) GetListen() string {
+	if a.Listen != "" {
+		return a.Listen
+	}
+	return "127.0.0.1:9090"
+}
+
+// TLSConfig TLS 证书配置
+type TLSConfig struct {
+	CertFile string `yaml:"cert_file" mapstructure:"cert_file"`
+	KeyFile  string `yaml:"key_file" mapstructure:"key_file"`
 }
 
 // ServerConfig 服务器配置
@@ -29,6 +48,15 @@ type ServerConfig struct {
 	GracefulShutdownTimeout time.Duration `yaml:"graceful_shutdown_timeout" mapstructure:"graceful_shutdown_timeout"`
 	PIDFile                 string        `yaml:"pid_file" mapstructure:"pid_file"`
 	TrustedProxies          []string      `yaml:"trusted_proxies" mapstructure:"trusted_proxies"`
+	MaxBodyBytes            int64         `yaml:"max_body_bytes" mapstructure:"max_body_bytes"`
+	TLS                     TLSConfig     `yaml:"tls" mapstructure:"tls"`
+}
+
+func (s *ServerConfig) GetMaxBodyBytes() int64 {
+	if s.MaxBodyBytes > 0 {
+		return s.MaxBodyBytes
+	}
+	return 1048576 // 默认 1MB
 }
 
 // GetReadHeaderTimeout 获取实际生效的 ReadHeaderTimeout
