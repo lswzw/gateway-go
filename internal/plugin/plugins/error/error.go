@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"gateway-go/internal/errors"
+	"gateway-go/internal/netutil"
 	"gateway-go/internal/plugin/core"
 	"net/http"
 	"time"
@@ -73,7 +74,7 @@ func (p *ErrorPlugin) handleError(ctx *gin.Context, err error) {
 			zap.Error(e.Err),
 			zap.String("path", ctx.Request.URL.Path),
 			zap.String("method", ctx.Request.Method),
-			zap.String("ip", ctx.ClientIP()),
+			zap.String("ip", netutil.GetClientIP(ctx)),
 		)
 
 		// 发送错误通知
@@ -91,7 +92,7 @@ func (p *ErrorPlugin) handleError(ctx *gin.Context, err error) {
 		zap.Error(err),
 		zap.String("path", ctx.Request.URL.Path),
 		zap.String("method", ctx.Request.Method),
-		zap.String("ip", ctx.ClientIP()),
+		zap.String("ip", netutil.GetClientIP(ctx)),
 	)
 
 	// 发送错误通知

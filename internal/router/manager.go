@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"gateway-go/internal/config"
+	"gateway-go/internal/netutil"
 	"gateway-go/internal/plugin"
 
 	"github.com/fsnotify/fsnotify"
@@ -480,7 +481,16 @@ func (m *Manager) handleABTest(c *gin.Context, route *RouteDefinition) (*TargetS
 		bucketKey = c.GetHeader("X-User-ID")
 	}
 	if bucketKey == "" {
-		bucketKey = c.ClientIP()
+		var trustedProxies []string
+		if m.configManager != nil {
+			if cfg := m.configManager.GetConfig(); cfg != nil {
+				trustedProxies = cfg.Server.TrustedProxies
+			}
+		}
+		if len(trustedProxies) == 0 {
+			trustedProxies = netutil.GetDefaultTrustedProxies()
+		}
+		bucketKey = netutil.ClientIP(c, trustedProxies)
 	}
 
 	// 计算哈希值

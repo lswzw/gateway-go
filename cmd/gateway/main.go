@@ -18,6 +18,7 @@ import (
 
 	"gateway-go/internal/config"
 	"gateway-go/internal/logger"
+	"gateway-go/internal/netutil"
 	"gateway-go/internal/plugin"
 	"gateway-go/internal/plugin/plugins/circuitbreaker"
 	"gateway-go/internal/plugin/plugins/consistency"
@@ -360,27 +361,42 @@ func loadRoutePlugins(cfg *config.Config) error {
 
 // buildEngine 构建gin引擎
 func buildEngine() *gin.Engine {
+	var cfg *config.Config
+	if configManager != nil {
+		cfg = configManager.GetConfig()
+	}
+	return buildEngineWithConfig(cfg)
+}
+
+// buildEngineWithConfig 使用给定配置构建gin引擎
+func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 	r := gin.New()
 
 	// 使用基础的gin中间件
 	r.Use(gin.Recovery())
 
+	var trustedProxies []string
+	if cfg != nil {
+		trustedProxies = cfg.Server.TrustedProxies
+	}
+
+	if len(trustedProxies) > 0 {
+		_ = r.SetTrustedProxies(trustedProxies)
+	} else {
+		_ = r.SetTrustedProxies(nil)
+		r.ForwardedByClientIP = false
+	}
+	netutil.SetDefaultTrustedProxies(trustedProxies)
+
 	registerConfigRoutes(r)
-	registerRoutes(r)
+	registerRoutesWithConfig(r, cfg)
 	return r
 }
 
 // reloadRoutes 重新加载路由
 func reloadRoutes() {
 	// 清除现有路由
-	globalEngine = gin.New()
-	globalEngine.Use(gin.Recovery())
-
-	// 重新注册配置管理路由
-	registerConfigRoutes(globalEngine)
-
-	// 重新注册业务路由
-	registerRoutes(globalEngine)
+	globalEngine = buildEngine()
 
 	// 更新服务器处理器
 	globalServer.Handler = globalEngine
@@ -398,7 +414,15 @@ func registerConfigRoutes(r *gin.Engine) {
 
 // registerRoutes 注册业务路由
 func registerRoutes(r *gin.Engine) {
+	if configManager == nil {
+		return
+	}
 	cfg := configManager.GetConfig()
+	registerRoutesWithConfig(r, cfg)
+}
+
+// registerRoutesWithConfig 使用指定配置注册业务路由
+func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
@@ -436,7 +460,7 @@ func registerRoutes(r *gin.Engine) {
 				zap.String("path", req.URL.Path),
 				zap.String("raw_query", req.URL.RawQuery),
 				zap.Any("standard_headers", headers),
-				zap.String("client_ip", c.ClientIP()),
+				zap.String("client_ip", netutil.ClientIP(c, cfg.Server.TrustedProxies)),
 				zap.Time("start_time", startTime),
 				zap.String("body", bodyStr),
 			)
@@ -617,7 +641,7 @@ func registerRoutes(r *gin.Engine) {
 				zap.String("path", c.Request.URL.Path),
 				zap.Int("status", statusCode),
 				zap.Duration("cost", cost),
-				zap.String("client_ip", c.ClientIP()),
+				zap.String("client_ip", netutil.ClientIP(c, cfg.Server.TrustedProxies)),
 				zap.String("target", target),
 			)
 		}
@@ -629,7 +653,7 @@ func registerRoutes(r *gin.Engine) {
 			logger.Log.Warn("未匹配到路由",
 				zap.String("method", c.Request.Method),
 				zap.String("path", c.Request.URL.Path),
-				zap.String("client_ip", c.ClientIP()),
+				zap.String("client_ip", netutil.ClientIP(c, cfg.Server.TrustedProxies)),
 			)
 		}
 		c.JSON(404, gin.H{
