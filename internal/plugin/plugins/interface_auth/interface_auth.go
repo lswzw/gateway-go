@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gateway-go/internal/plugin/core"
+	"gateway-go/internal/response"
 
 	"github.com/gin-gonic/gin"
 )
@@ -118,14 +119,19 @@ func (p *Plugin) Execute(ctx *gin.Context) error {
 	// 获取Authorization头
 	token := p.getTokenFromAuthorizationHeader(ctx)
 	if token == "" {
-		ctx.JSON(ErrTokenMissingOrInvalid.Code, ErrTokenMissingOrInvalid)
-		ctx.Abort()
-		return fmt.Errorf("token缺失或无效")
+		response.RespondError(ctx, http.StatusUnauthorized, "Token missing or invalid", response.GetRequestID(ctx))
+		return nil
 	}
 
 	// 调用外部认证服务
 	if err := p.callAuthService(ctx, token); err != nil {
-		return err
+		if !ctx.Writer.Written() {
+			response.RespondError(ctx, http.StatusUnauthorized, err.Error(), response.GetRequestID(ctx))
+		}
+		return nil
+	}
+	if ctx.IsAborted() || ctx.Writer.Written() {
+		return nil
 	}
 
 	// 认证成功，写入缓存结果
@@ -199,9 +205,8 @@ func (p *Plugin) callAuthService(ctx *gin.Context, token string) error {
 	// 创建请求
 	req, err := http.NewRequest("GET", authURL, nil)
 	if err != nil {
-		ctx.JSON(ErrAuthServiceCallFailed.Code, ErrAuthServiceCallFailed)
-		ctx.Abort()
-		return fmt.Errorf("创建认证请求失败: %v", err)
+		response.RespondError(ctx, http.StatusInternalServerError, "Auth service call failed", response.GetRequestID(ctx))
+		return nil
 	}
 
 	// 设置请求头
@@ -211,21 +216,15 @@ func (p *Plugin) callAuthService(ctx *gin.Context, token string) error {
 	// 发送请求
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		ctx.JSON(ErrAuthServiceCallFailed.Code, ErrAuthServiceCallFailed)
-		ctx.Abort()
-		return fmt.Errorf("调用认证服务失败: %v", err)
+		response.RespondError(ctx, http.StatusInternalServerError, "Auth service call failed", response.GetRequestID(ctx))
+		return nil
 	}
 	defer resp.Body.Close()
 
 	// 检查响应状态码
 	if resp.StatusCode != http.StatusOK {
-		errResp := ErrorResponse{
-			Code:    resp.StatusCode,
-			Message: "Unauthorized: Invalid response",
-		}
-		ctx.JSON(resp.StatusCode, errResp)
-		ctx.Abort()
-		return fmt.Errorf("认证服务返回错误状态码: %d", resp.StatusCode)
+		response.RespondError(ctx, http.StatusUnauthorized, "Unauthorized: Invalid response", response.GetRequestID(ctx))
+		return nil
 	}
 
 	// 读取响应体
@@ -237,9 +236,8 @@ func (p *Plugin) callAuthService(ctx *gin.Context, token string) error {
 	}
 
 	if len(body) == 0 {
-		ctx.JSON(ErrNoResponseBody.Code, ErrNoResponseBody)
-		ctx.Abort()
-		return fmt.Errorf("认证服务返回空响应体")
+		response.RespondError(ctx, http.StatusInternalServerError, "Internal error: no response body", response.GetRequestID(ctx))
+		return nil
 	}
 
 	// 解析响应
@@ -247,17 +245,15 @@ func (p *Plugin) callAuthService(ctx *gin.Context, token string) error {
 	switch responseBody {
 	case "true":
 		// 认证失败
-		ctx.JSON(ErrForbiddenAccessDenied.Code, ErrForbiddenAccessDenied)
-		ctx.Abort()
-		return fmt.Errorf("认证失败")
+		response.RespondError(ctx, http.StatusUnauthorized, "Forbidden: Access denied", response.GetRequestID(ctx))
+		return nil
 	case "false":
 		// 认证成功，继续处理
 		return nil
 	default:
 		// 未知响应
-		ctx.JSON(ErrUnknownResponseType.Code, ErrUnknownResponseType)
-		ctx.Abort()
-		return fmt.Errorf("认证服务返回未知响应: %s", responseBody)
+		response.RespondError(ctx, http.StatusUnauthorized, "response Unknown Type", response.GetRequestID(ctx))
+		return nil
 	}
 }
 

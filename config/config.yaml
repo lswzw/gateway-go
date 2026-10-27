@@ -71,17 +71,17 @@ plugins:
         max_age: "12h"           # 预检请求的缓存时间
         allow_credentials: true  # 是否允许携带认证信息
 
-    # 错误处理插件 - 统一错误响应格式
-    - name: error
-      enabled: true
-      order: 100                 # 通常放在最后执行
-      config:
-        # 错误处理配置
-        include_stack_trace: false  # 是否在响应中包含堆栈信息（生产环境建议false）
-        log_errors: true         # 是否记录错误日志
-        # custom_error_messages:   # 自定义错误消息映射
-        #   404: "资源未找到"
-        #   500: "服务器内部错误"
+    # 错误处理插件已彻底下线（REQ-P0-04），错误处理与响应格式化全量由网关核心 respondError 接管，无需在此配置
+    # - name: error
+    #   enabled: true
+    #   order: 100                 # 通常放在最后执行
+    #   config:
+    #     # 错误处理配置
+    #     include_stack_trace: false  # 是否在响应中包含堆栈信息（生产环境建议false）
+    #     log_errors: true         # 是否记录错误日志
+    #     # custom_error_messages:   # 自定义错误消息映射
+    #     #   404: "资源未找到"
+    #     #   500: "服务器内部错误"
 
     # IP白名单插件 - 基于IP地址的访问控制
     - name: ip_whitelist

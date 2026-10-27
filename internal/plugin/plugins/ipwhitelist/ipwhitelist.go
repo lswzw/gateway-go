@@ -3,11 +3,13 @@ package ipwhitelist
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 
 	"gateway-go/internal/netutil"
 	"gateway-go/internal/plugin/core"
+	"gateway-go/internal/response"
 
 	"github.com/gin-gonic/gin"
 )
@@ -73,10 +75,8 @@ func (p *IPWhitelistPlugin) Execute(ctx *gin.Context) error {
 
 	// 检查 IP 是否在白名单中
 	if !p.isIPAllowed(clientIP) {
-		ctx.JSON(403, gin.H{
-			"error": "IP 不在白名单中",
-		})
-		return fmt.Errorf("IP %s 不在白名单中", clientIP)
+		response.RespondError(ctx, http.StatusForbidden, "IP 不在白名单中", response.GetRequestID(ctx))
+		return nil
 	}
 
 	return nil

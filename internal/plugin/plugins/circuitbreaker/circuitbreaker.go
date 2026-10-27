@@ -2,11 +2,13 @@ package circuitbreaker
 
 import (
 	"fmt"
-	"gateway-go/internal/plugin/core"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"gateway-go/internal/plugin/core"
+	"gateway-go/internal/response"
 
 	"github.com/gin-gonic/gin"
 )
@@ -77,10 +79,7 @@ func (p *CircuitBreakerPlugin) Execute(ctx *gin.Context) error {
 
 	// 检查熔断器状态
 	if !cb.allowRequest() {
-		ctx.JSON(http.StatusServiceUnavailable, gin.H{
-			"error": "服务暂时不可用",
-		})
-		ctx.Abort()
+		response.RespondError(ctx, http.StatusServiceUnavailable, "服务暂时不可用", response.GetRequestID(ctx))
 		return nil
 	}
 
@@ -121,6 +120,16 @@ func (p *CircuitBreakerPlugin) cleanupInactiveCircuitBreakers() {
 			delete(p.circuitBreakers, target)
 		}
 	}
+}
+
+// GetCircuitBreaker 获取或创建熔断器（导出供管理与测试使用）
+func (p *CircuitBreakerPlugin) GetCircuitBreaker(target string) *CircuitBreaker {
+	return p.getCircuitBreaker(target)
+}
+
+// SetState 设置熔断器状态
+func (cb *CircuitBreaker) SetState(state CircuitBreakerState) {
+	atomic.StoreInt32(&cb.state, int32(state))
 }
 
 // getCircuitBreaker 获取或创建熔断器

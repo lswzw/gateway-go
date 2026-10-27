@@ -2,9 +2,11 @@ package cors
 
 import (
 	"fmt"
-	"gateway-go/internal/plugin/core"
 	"net/http"
 	"strings"
+
+	"gateway-go/internal/plugin/core"
+	"gateway-go/internal/response"
 
 	"github.com/gin-gonic/gin"
 )
@@ -52,7 +54,7 @@ func (p *CorsPlugin) Execute(ctx *gin.Context) error {
 func (p *CorsPlugin) handlePreflight(ctx *gin.Context) {
 	origin := ctx.GetHeader("Origin")
 	if !p.isOriginAllowed(origin) {
-		ctx.Status(http.StatusForbidden)
+		response.RespondError(ctx, http.StatusForbidden, "CORS origin not allowed", response.GetRequestID(ctx))
 		return
 	}
 

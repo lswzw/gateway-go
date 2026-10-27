@@ -25,10 +25,10 @@ import (
 	"gateway-go/internal/plugin/plugins/circuitbreaker"
 	"gateway-go/internal/plugin/plugins/consistency"
 	"gateway-go/internal/plugin/plugins/cors"
-	errorplugin "gateway-go/internal/plugin/plugins/error"
 	"gateway-go/internal/plugin/plugins/interface_auth"
 	"gateway-go/internal/plugin/plugins/ipwhitelist"
 	"gateway-go/internal/plugin/plugins/ratelimit"
+	"gateway-go/internal/response"
 	"gateway-go/internal/router"
 
 	"github.com/gin-gonic/gin"
@@ -432,11 +432,6 @@ func registerPlugins() {
 		log.Printf("注册跨域插件失败: %v", err)
 	}
 
-	// 注册错误处理插件
-	if err := pluginManager.Register(errorplugin.New()); err != nil {
-		log.Printf("注册错误处理插件失败: %v", err)
-	}
-
 	// 注册IP白名单插件
 	if err := pluginManager.Register(ipwhitelist.New()); err != nil {
 		log.Printf("注册IP白名单插件失败: %v", err)
@@ -494,6 +489,20 @@ func loadRoutePlugins(cfg *config.Config) error {
 	return nil
 }
 
+// customRecovery 自定义恢复中间件，确保未捕获 panic 统一经由 respondError 输出标准结构
+func customRecovery() gin.HandlerFunc {
+	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
+		reqID := response.GetRequestID(c)
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.ErrorLevel) {
+			logger.Log.Error("服务器内部发生 panic",
+				zap.Any("error", recovered),
+				zap.String("request_id", reqID),
+			)
+		}
+		respondError(c, http.StatusInternalServerError, "服务器内部错误", reqID)
+	})
+}
+
 // buildEngine 构建gin引擎
 func buildEngine() *gin.Engine {
 	var cfg *config.Config
@@ -507,8 +516,8 @@ func buildEngine() *gin.Engine {
 func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 	r := gin.New()
 
-	// 使用基础的gin中间件
-	r.Use(gin.Recovery())
+	// 使用统一错误输出的恢复中间件
+	r.Use(customRecovery())
 
 	var trustedProxies []string
 	if cfg != nil {
@@ -530,7 +539,7 @@ func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 
 // reloadRoutes 重新加载路由
 func reloadRoutes() {
-	// 清除现有路由
+	// 清除现有路由并重新构建
 	globalEngine = buildEngine()
 
 	// 更新服务器处理器
@@ -635,23 +644,39 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 		// 设置目标信息到上下文
 		c.Set("target", matchedRoute.Target.URL)
 
+		reqID := response.GetRequestID(c)
+
 		// 执行插件链
 		if err := pluginManager.Execute(c, matchedRoute.Name); err != nil {
+			failedPlugin, _ := c.Get("failed_plugin")
+			pluginName, _ := failedPlugin.(string)
+			if c.Writer.Written() {
+				if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
+					logger.Log.Warn("插件已写响应但返回错误(违反契约，忽略该错误)",
+						zap.String("route_name", matchedRoute.Name),
+						zap.String("plugin", pluginName),
+						zap.String("request_id", reqID),
+						zap.Error(err),
+					)
+				}
+				c.Abort()
+				return
+			}
+
 			if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
 				logger.Log.Warn("插件执行失败",
 					zap.String("route_name", matchedRoute.Name),
-					zap.String("error", err.Error()),
+					zap.String("plugin", pluginName),
+					zap.String("request_id", reqID),
+					zap.Error(err),
 				)
 			}
-			c.JSON(500, gin.H{
-				"error": err.Error(),
-			})
-			c.Abort()
+			respondError(c, 500, err.Error(), reqID)
 			return
 		}
 
-		// 如果请求被中止，直接返回
-		if c.IsAborted() {
+		// 如果请求被中止或已写响应，直接返回
+		if c.IsAborted() || c.Writer.Written() {
 			return
 		}
 
@@ -683,13 +708,11 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 				logger.Log.Warn("目标URL无效",
 					zap.String("route_name", matchedRoute.Name),
 					zap.String("target_url", matchedRoute.Target.URL),
+					zap.String("request_id", reqID),
 					zap.String("error", err.Error()),
 				)
 			}
-			c.JSON(500, gin.H{
-				"error": fmt.Sprintf("无效的目标URL: %v", err),
-			})
-			c.Abort()
+			respondError(c, 500, fmt.Sprintf("无效的目标URL: %v", err), reqID)
 			return
 		}
 		if logger.Log != nil && logger.Log.Core().Enabled(zap.DebugLevel) {
@@ -726,12 +749,11 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 				logger.Log.Warn("反向代理失败",
 					zap.String("route_name", matchedRoute.Name),
 					zap.String("target_url", matchedRoute.Target.URL),
+					zap.String("request_id", reqID),
 					zap.String("error", err.Error()),
 				)
 			}
-			c.JSON(http.StatusBadGateway, gin.H{
-				"error": fmt.Sprintf("代理请求失败: %v", err),
-			})
+			respondError(c, http.StatusBadGateway, fmt.Sprintf("代理请求失败: %v", err), reqID)
 		}
 		// 捕获后端响应体
 		proxy.ModifyResponse = func(resp *http.Response) error {
@@ -784,17 +806,22 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 
 	// 注册一个通配符路由来捕获所有请求
 	r.NoRoute(func(c *gin.Context) {
+		reqID := response.GetRequestID(c)
 		if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
 			logger.Log.Warn("未匹配到路由",
 				zap.String("method", c.Request.Method),
 				zap.String("path", c.Request.URL.Path),
 				zap.String("client_ip", netutil.ClientIP(c, cfg.Server.TrustedProxies)),
+				zap.String("request_id", reqID),
 			)
 		}
-		c.JSON(404, gin.H{
-			"error": "未找到匹配的路由",
-		})
+		respondError(c, 404, "未找到匹配的路由", reqID)
 	})
+}
+
+// respondError 统一写出错误响应
+func respondError(c *gin.Context, code int, message string, requestID string) {
+	response.RespondError(c, code, message, requestID)
 }
 
 // matchRoute 检查路径是否匹配路由规则
