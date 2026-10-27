@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"gateway-go/internal/plugin/core"
+	"gateway-go/internal/response"
 
 	"github.com/gin-gonic/gin"
 )
@@ -132,11 +133,8 @@ func (p *ConsistencyPlugin) Execute(c *gin.Context) error {
 
 	// 校验请求
 	if err := p.checkRequest(c); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
-		c.Abort()
-		return err
+		response.RespondError(c, http.StatusBadRequest, err.Error(), response.GetRequestID(c))
+		return nil
 	}
 
 	// 如果需要校验响应

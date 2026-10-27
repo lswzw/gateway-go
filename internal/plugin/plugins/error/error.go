@@ -3,10 +3,12 @@ package error
 import (
 	"context"
 	"fmt"
-	"gateway-go/internal/errors"
-	"gateway-go/internal/plugin/core"
 	"net/http"
 	"time"
+
+	"gateway-go/internal/errors"
+	"gateway-go/internal/plugin/core"
+	"gateway-go/internal/response"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -63,44 +65,60 @@ func (p *ErrorPlugin) Execute(ctx *gin.Context) error {
 
 // handleError 处理错误
 func (p *ErrorPlugin) handleError(ctx *gin.Context, err error) {
+	if ctx.Writer.Written() {
+		return
+	}
+
+	reqID := response.GetRequestID(ctx)
+
 	// 尝试转换为自定义错误
 	if e, ok := errors.As(err); ok {
 		// 记录错误日志
-		p.logger.Error("请求处理错误",
-			zap.Int("code", int(e.Code)),
-			zap.String("message", e.Message),
-			zap.Any("details", e.Details),
-			zap.Error(e.Err),
-			zap.String("path", ctx.Request.URL.Path),
-			zap.String("method", ctx.Request.Method),
-			zap.String("ip", ctx.ClientIP()),
-		)
+		if p.logger != nil {
+			p.logger.Error("请求处理错误",
+				zap.Int("code", int(e.Code)),
+				zap.String("message", e.Message),
+				zap.Any("details", e.Details),
+				zap.Error(e.Err),
+				zap.String("path", ctx.Request.URL.Path),
+				zap.String("method", ctx.Request.Method),
+				zap.String("ip", ctx.ClientIP()),
+				zap.String("request_id", reqID),
+			)
+		}
 
 		// 发送错误通知
-		notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		p.notifier.Notify(notifyCtx, e)
+		if p.notifier != nil {
+			notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			p.notifier.Notify(notifyCtx, e)
+		}
 
 		// 返回错误响应
-		ctx.JSON(e.HTTPStatus(), e)
+		response.RespondError(ctx, e.HTTPStatus(), e.Message, reqID)
 		return
 	}
 
 	// 处理未知错误
-	p.logger.Error("未知错误",
-		zap.Error(err),
-		zap.String("path", ctx.Request.URL.Path),
-		zap.String("method", ctx.Request.Method),
-		zap.String("ip", ctx.ClientIP()),
-	)
+	if p.logger != nil {
+		p.logger.Error("未知错误",
+			zap.Error(err),
+			zap.String("path", ctx.Request.URL.Path),
+			zap.String("method", ctx.Request.Method),
+			zap.String("ip", ctx.ClientIP()),
+			zap.String("request_id", reqID),
+		)
+	}
 
 	// 发送错误通知
-	notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	p.notifier.Notify(notifyCtx, err)
+	if p.notifier != nil {
+		notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		p.notifier.Notify(notifyCtx, err)
+	}
 
 	// 返回通用错误响应
-	ctx.JSON(http.StatusInternalServerError, errors.New(errors.ErrInternalServerError, "服务器内部错误"))
+	response.RespondError(ctx, http.StatusInternalServerError, "服务器内部错误", reqID)
 }
 
 // SetLogger 设置日志记录器

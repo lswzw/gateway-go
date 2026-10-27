@@ -170,6 +170,13 @@ func (cm *ConfigManager) GetConfig() *Config {
 	return cm.currentConfig
 }
 
+// SetConfig 设置配置（供测试或程序化配置使用）
+func (cm *ConfigManager) SetConfig(cfg *Config) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.currentConfig = cfg
+}
+
 // AddReloadHook 添加重载钩子
 func (cm *ConfigManager) AddReloadHook(hook func(*Config) error) {
 	cm.mu.Lock()

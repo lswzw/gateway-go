@@ -54,6 +54,11 @@ func (c *Chain) AddPlugin(p core.Plugin) {
 // Execute 执行插件链
 func (c *Chain) Execute(ctx *gin.Context) error {
 	for _, p := range c.plugins {
+		// 若请求已被前置插件中止或已写出响应，中断链条执行
+		if ctx.IsAborted() || (ctx.Writer != nil && ctx.Writer.Written()) {
+			return nil
+		}
+
 		var cacheKey string
 		if c.cache != nil && c.genKey != nil {
 			cacheKey = c.genKey(ctx, p.Name())
@@ -68,8 +73,14 @@ func (c *Chain) Execute(ctx *gin.Context) error {
 			}
 		}
 		if err := p.Execute(ctx); err != nil {
+			ctx.Set("failed_plugin", p.Name())
 			return err
 		}
+		// 若当前插件中止了请求或已写出响应，中断后续插件
+		if ctx.IsAborted() || (ctx.Writer != nil && ctx.Writer.Written()) {
+			return nil
+		}
+
 		// 执行后写入缓存
 		if c.cache != nil && c.genKey != nil {
 			resultKey := "plugin_result_" + p.Name()

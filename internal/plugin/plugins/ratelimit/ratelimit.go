@@ -2,10 +2,12 @@ package ratelimit
 
 import (
 	"fmt"
-	"gateway-go/internal/plugin/core"
 	"net/http"
 	"sync"
 	"time"
+
+	"gateway-go/internal/plugin/core"
+	"gateway-go/internal/response"
 
 	"github.com/gin-gonic/gin"
 )
@@ -65,10 +67,7 @@ func (p *RateLimitPlugin) Execute(ctx *gin.Context) error {
 
 	// 尝试获取令牌
 	if !bucket.allow() {
-		ctx.JSON(http.StatusTooManyRequests, gin.H{
-			"error": "请求过于频繁",
-		})
-		ctx.Abort()
+		response.RespondError(ctx, http.StatusTooManyRequests, "请求过于频繁", response.GetRequestID(ctx))
 		return nil
 	}
 
