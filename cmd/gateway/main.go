@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"hash"
@@ -367,8 +368,14 @@ func runServer(ctx context.Context, srv *http.Server, cfg *config.Config, pm *pl
 	// 启动 HTTP 服务，启动/运行错误通过 errCh 传递到主流程
 	go func() {
 		fmt.Printf("启动HTTP服务器，监听端口: %d\n", cfg.Server.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+		if cfg.Server.TLS.CertFile != "" && cfg.Server.TLS.KeyFile != "" {
+			if err := srv.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		} else {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
 		}
 	}()
 
@@ -496,6 +503,16 @@ func loadRoutePlugins(cfg *config.Config) error {
 func customRecovery() gin.HandlerFunc {
 	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
 		reqID := response.GetRequestID(c)
+		if rErr, ok := recovered.(error); ok {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(rErr, &maxBytesErr) || strings.Contains(rErr.Error(), "request body too large") {
+				respondError(c, http.StatusRequestEntityTooLarge, "请求体超过限制大小", reqID)
+				return
+			}
+		} else if s, ok := recovered.(string); ok && strings.Contains(s, "request body too large") {
+			respondError(c, http.StatusRequestEntityTooLarge, "请求体超过限制大小", reqID)
+			return
+		}
 		if logger.Log != nil && logger.Log.Core().Enabled(zap.ErrorLevel) {
 			logger.Log.Error("服务器内部发生 panic",
 				zap.Any("error", recovered),
@@ -504,6 +521,47 @@ func customRecovery() gin.HandlerFunc {
 		}
 		respondError(c, http.StatusInternalServerError, "服务器内部错误", reqID)
 	})
+}
+
+// maxBodyBytesMiddleware 限制请求体大小，超限返回统一 413 响应 (REQ-P1-05)
+func maxBodyBytesMiddleware(initialCfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var maxBody int64 = 1048576 // 默认 1MB
+		cfg := initialCfg
+		if configManager != nil {
+			if dynamicCfg := configManager.GetConfig(); dynamicCfg != nil {
+				cfg = dynamicCfg
+			}
+		}
+		if cfg != nil {
+			maxBody = cfg.Server.GetMaxBodyBytes()
+		}
+
+		if maxBody > 0 && c.Request.Body != nil && c.Request.Body != http.NoBody {
+			reqID := response.GetRequestID(c)
+			// 若已声明 Content-Length 且超过限制大小，直接拒绝并返回 413
+			if c.Request.ContentLength > maxBody {
+				respondError(c, http.StatusRequestEntityTooLarge, "请求体超过限制大小", reqID)
+				c.Abort()
+				return
+			}
+			// 包装 MaxBytesReader 以防未声明或流式请求体超过限制大小
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBody)
+		}
+		c.Next()
+
+		// 检查后置阶段中读取 body 产生的 MaxBytesError
+		for _, err := range c.Errors {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err.Err, &maxBytesErr) || strings.Contains(err.Error(), "request body too large") {
+				if !c.Writer.Written() {
+					respondError(c, http.StatusRequestEntityTooLarge, "请求体超过限制大小", response.GetRequestID(c))
+					c.Abort()
+				}
+				return
+			}
+		}
+	}
 }
 
 // buildEngine 构建gin引擎
@@ -519,9 +577,10 @@ func buildEngine() *gin.Engine {
 func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 	r := gin.New()
 
-	// 注册链路最外层中间件：Access Log 与统一错误输出的 customRecovery
+	// 注册链路最外层中间件：Access Log 与统一错误输出的 customRecovery 与 MaxBodyBytes 限制
 	r.Use(accessLogMiddleware())
 	r.Use(customRecovery())
+	r.Use(maxBodyBytesMiddleware(cfg))
 
 	var trustedProxies []string
 	if cfg != nil {
@@ -587,6 +646,8 @@ func getErrorKind(c *gin.Context, status int) string {
 		return ek
 	}
 	switch {
+	case status == http.StatusRequestEntityTooLarge:
+		return "payload_too_large"
 	case status == http.StatusBadGateway:
 		return "bad_gateway"
 	case status == http.StatusGatewayTimeout:
@@ -938,6 +999,11 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 		}
 		// 设置错误处理
 		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) || strings.Contains(err.Error(), "request body too large") {
+				respondError(c, http.StatusRequestEntityTooLarge, "请求体超过限制大小", reqID)
+				return
+			}
 			if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
 				logger.Log.Warn("反向代理失败",
 					zap.String("route_name", matchedRoute.Name),
