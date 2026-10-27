@@ -149,6 +149,10 @@ func validatePluginConfig(config *PluginConfig) error {
 		return fmt.Errorf("插件名称不能为空")
 	}
 
+	if config.Name == "error" {
+		return fmt.Errorf("error plugin has been deprecated; error handling is now unified into gateway core respondError")
+	}
+
 	if config.Order < 0 {
 		return fmt.Errorf("无效的插件执行顺序: %d", config.Order)
 	}

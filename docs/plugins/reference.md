@@ -16,9 +16,9 @@
 - **文档位置**: `internal/plugin/plugins/cors/README.md`
 - **功能**: 处理跨域资源共享（CORS）请求，支持灵活配置允许的源、方法、头等
 
-### 4. 错误处理插件（error）
-- **文档位置**: `internal/plugin/plugins/error/README.md`
-- **功能**: 统一处理API错误响应，支持自定义错误页面、响应格式和错误码映射
+### 4. 错误处理插件（error）[已彻底下线/Deprecated]
+- **说明**: `error` 插件已彻底下线（REQ-P0-04）。错误处理、结构化响应输出与监控告警已全量收敛至网关核心统一错误出口 `respondError`，不再保留独立的 `error` 插件。
+- **状态**: 废弃并移除。配置中若存在 `error` 插件将在启动时报错并提示迁移。所有 404/500/502 等错误均由网关核心统一输出标准 `{code, message, request_id}` 格式。
 
 ### 5. IP白名单插件（ip_whitelist）
 - **文档位置**: `internal/plugin/plugins/ipwhitelist/README.md`

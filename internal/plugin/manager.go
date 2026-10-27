@@ -67,6 +67,13 @@ func (m *Manager) LoadAvailablePlugins(configs []PluginConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// 检查是否有已弃用的插件（优先校验，即使 enabled 为 false 也提示废弃）
+	for _, cfg := range configs {
+		if cfg.Name == "error" {
+			return fmt.Errorf("error plugin has been deprecated; error handling is now unified into gateway core respondError")
+		}
+	}
+
 	// 按执行顺序排序
 	sort.Slice(configs, func(i, j int) bool {
 		return configs[i].Order < configs[j].Order
@@ -103,6 +110,10 @@ func (m *Manager) LoadRoutePlugins(routeName string, pluginNames []string) error
 
 	// 根据插件名称加载路由插件
 	for _, pluginName := range pluginNames {
+		if pluginName == "error" {
+			return fmt.Errorf("error plugin has been deprecated; error handling is now unified into gateway core respondError")
+		}
+
 		p, exists := m.availablePlugins[pluginName]
 		if !exists {
 			return fmt.Errorf("路由 %s 使用的插件 %s 不可用", routeName, pluginName)

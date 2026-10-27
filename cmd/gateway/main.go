@@ -22,7 +22,6 @@ import (
 	"gateway-go/internal/plugin/plugins/circuitbreaker"
 	"gateway-go/internal/plugin/plugins/consistency"
 	"gateway-go/internal/plugin/plugins/cors"
-	errorplugin "gateway-go/internal/plugin/plugins/error"
 	"gateway-go/internal/plugin/plugins/interface_auth"
 	"gateway-go/internal/plugin/plugins/ipwhitelist"
 	"gateway-go/internal/plugin/plugins/ratelimit"
@@ -297,11 +296,6 @@ func registerPlugins() {
 		log.Printf("注册跨域插件失败: %v", err)
 	}
 
-	// 注册错误处理插件
-	if err := pluginManager.Register(errorplugin.New()); err != nil {
-		log.Printf("注册错误处理插件失败: %v", err)
-	}
-
 	// 注册IP白名单插件
 	if err := pluginManager.Register(ipwhitelist.New()); err != nil {
 		log.Printf("注册IP白名单插件失败: %v", err)
@@ -359,12 +353,26 @@ func loadRoutePlugins(cfg *config.Config) error {
 	return nil
 }
 
+// customRecovery 自定义恢复中间件，确保未捕获 panic 统一经由 respondError 输出标准结构
+func customRecovery() gin.HandlerFunc {
+	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
+		reqID := response.GetRequestID(c)
+		if logger.Log != nil && logger.Log.Core().Enabled(zap.ErrorLevel) {
+			logger.Log.Error("服务器内部发生 panic",
+				zap.Any("error", recovered),
+				zap.String("request_id", reqID),
+			)
+		}
+		respondError(c, http.StatusInternalServerError, "服务器内部错误", reqID)
+	})
+}
+
 // buildEngine 构建gin引擎
 func buildEngine() *gin.Engine {
 	r := gin.New()
 
-	// 使用基础的gin中间件
-	r.Use(gin.Recovery())
+	// 使用统一错误输出的恢复中间件
+	r.Use(customRecovery())
 
 	registerConfigRoutes(r)
 	registerRoutes(r)
@@ -375,7 +383,7 @@ func buildEngine() *gin.Engine {
 func reloadRoutes() {
 	// 清除现有路由
 	globalEngine = gin.New()
-	globalEngine.Use(gin.Recovery())
+	globalEngine.Use(customRecovery())
 
 	// 重新注册配置管理路由
 	registerConfigRoutes(globalEngine)
