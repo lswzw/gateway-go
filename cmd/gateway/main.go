@@ -31,6 +31,7 @@ import (
 	"gateway-go/internal/plugin/plugins/interface_auth"
 	"gateway-go/internal/plugin/plugins/ipwhitelist"
 	"gateway-go/internal/plugin/plugins/ratelimit"
+	"gateway-go/internal/proxy"
 	"gateway-go/internal/response"
 	"gateway-go/internal/router"
 
@@ -39,11 +40,12 @@ import (
 )
 
 var (
-	configManager *config.ConfigManager
-	pluginManager *plugin.Manager
-	routerManager *router.Manager
-	globalServer  *http.Server
-	globalEngine  *gin.Engine
+	configManager       *config.ConfigManager
+	pluginManager       *plugin.Manager
+	routerManager       *router.Manager
+	globalServer        *http.Server
+	globalEngine        *gin.Engine
+	globalTransportPool = proxy.NewTransportPool()
 )
 
 // 命令行参数
@@ -353,7 +355,12 @@ func (gs *GracefulServer) doShutdown(ctx context.Context) error {
 		gs.configManager.Stop()
 	}
 
-	// 4. 同步日志
+	// 4. 关闭上游连接池中的空闲连接
+	if globalTransportPool != nil {
+		globalTransportPool.CloseIdleConnections()
+	}
+
+	// 5. 同步日志
 	_ = logger.Sync()
 
 	return shutdownErr
@@ -925,19 +932,63 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 			}
 		}
 
+		// 1. 设置上游超时 Context (REQ-P1-01)
+		timeout := 30 * time.Second
+		if matchedRoute.Target.Timeout > 0 {
+			timeout = time.Duration(matchedRoute.Target.Timeout) * time.Millisecond
+		} else if cfg != nil && cfg.Server.WriteTimeout > 0 {
+			timeout = cfg.Server.WriteTimeout
+		}
+		proxyCtx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+		defer cancel()
+		c.Request = c.Request.WithContext(proxyCtx)
+
+		// 2. 对于幂等重试请求缓冲可重放请求体 (若为 PUT/DELETE 等且配置了重试)
+		if matchedRoute.Target.Retries > 0 && proxy.IsIdempotentMethod(c.Request.Method) {
+			_, _ = proxy.PrepareReplayableBody(c.Request, 64*1024)
+		}
+
 		// 创建反向代理
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		// 设置自定义的 Director
-		originalDirector := proxy.Director
-		proxy.Director = func(req *http.Request) {
+		proxyHandler := httputil.NewSingleHostReverseProxy(target)
+
+		// 3. 设置专属 Transport 连接池与幂等重试 Transport
+		transportKey := matchedRoute.Name
+		if transportKey == "" {
+			transportKey = target.Host
+		}
+		baseTransport := globalTransportPool.GetTransport(transportKey)
+		proxyHandler.Transport = &proxy.RetryTransport{
+			Base:       baseTransport,
+			MaxRetries: matchedRoute.Target.Retries,
+			OnRetry: func(req *http.Request, attempt int, err error, resp *http.Response) {
+				if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
+					logger.Log.Warn("上游请求失败，触发重试",
+						zap.String("route_name", matchedRoute.Name),
+						zap.String("target_url", matchedRoute.Target.URL),
+						zap.String("method", req.Method),
+						zap.Int("attempt", attempt),
+						zap.Error(err),
+					)
+				}
+			},
+		}
+
+		// 4. 设置自定义 Director (修复 Header 别名 Bug)
+		originalDirector := proxyHandler.Director
+		proxyHandler.Director = func(req *http.Request) {
 			originalDirector(req)
 			req.URL.Path = proxyPath
-			req.Header = c.Request.Header
+			// 修复 Header 别名 Bug：使用 Clone 进行深拷贝，防止并发修改污染客户端请求头
+			req.Header = c.Request.Header.Clone()
+			if _, ok := req.Header["User-Agent"]; !ok {
+				req.Header.Set("User-Agent", "")
+			}
 			req.Header.Set("X-Forwarded-Host", c.Request.Host)
 			req.Header.Set("X-Origin-Host", target.Host)
 		}
-		// 设置错误处理
-		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+
+		// 5. 设置错误处理 (统一错误出口与 504 Gateway Timeout 超时响应)
+		proxyHandler.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 			if logger.Log != nil && logger.Log.Core().Enabled(zap.WarnLevel) {
 				logger.Log.Warn("反向代理失败",
 					zap.String("route_name", matchedRoute.Name),
@@ -946,12 +997,22 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 					zap.String("error", err.Error()),
 				)
 			}
+			// 检查是否为上游请求超时
+			isTimeout := proxy.IsTimeoutError(err) ||
+				(req != nil && proxy.IsTimeoutError(req.Context().Err())) ||
+				(c.Request != nil && proxy.IsTimeoutError(c.Request.Context().Err()))
+			if isTimeout {
+				c.Set("error_kind", "timeout")
+				respondError(c, http.StatusGatewayTimeout, "上游服务请求超时", reqID)
+				return
+			}
+			c.Set("error_kind", "bad_gateway")
 			respondError(c, http.StatusBadGateway, fmt.Sprintf("代理请求失败: %v", err), reqID)
 		}
 		// 观察后端响应体 (流式旁路观察，禁止截断或回写)
 		var respObserver *bodyObserver
 		var respStatusCode int
-		proxy.ModifyResponse = func(resp *http.Response) error {
+		proxyHandler.ModifyResponse = func(resp *http.Response) error {
 			respStatusCode = resp.StatusCode
 			if resp.Body != nil {
 				respObserver = newBodyObserver(resp.Body, bodyLimit, enableSHA)
@@ -960,7 +1021,7 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 			return nil
 		}
 		// 执行代理请求
-		proxy.ServeHTTP(c.Writer, c.Request)
+		proxyHandler.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
 
 		cost := time.Since(startTime)

@@ -57,3 +57,33 @@ func TestValidateLogConfigBodyLimit(t *testing.T) {
 		t.Fatalf("expected error for body_limit > 65536")
 	}
 }
+
+func TestValidateRouteConfigTargetTimeoutAndRetries(t *testing.T) {
+	route := RouteConfig{
+		Name: "test-route",
+		Match: RouteMatch{
+			Type: "prefix",
+			Path: "/test",
+		},
+		Target: TargetConfig{
+			URL:     "http://localhost:8080",
+			Timeout: 1000,
+			Retries: 2,
+		},
+	}
+	if err := validateRouteConfig(&route); err != nil {
+		t.Fatalf("expected valid route config, got: %v", err)
+	}
+
+	invalidTimeout := route
+	invalidTimeout.Target.Timeout = -1
+	if err := validateRouteConfig(&invalidTimeout); err == nil {
+		t.Fatal("expected error for negative target.timeout")
+	}
+
+	invalidRetries := route
+	invalidRetries.Target.Retries = -1
+	if err := validateRouteConfig(&invalidRetries); err == nil {
+		t.Fatal("expected error for negative target.retries")
+	}
+}
