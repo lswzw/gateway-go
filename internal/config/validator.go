@@ -268,5 +268,13 @@ func validateRouteConfig(config *RouteConfig) error {
 		}
 	}
 
+	if config.Target.Timeout < 0 {
+		return fmt.Errorf("无效的目标超时时间: %d (必须 >= 0)", config.Target.Timeout)
+	}
+
+	if config.Target.Retries < 0 {
+		return fmt.Errorf("无效的目标重试次数: %d (必须 >= 0)", config.Target.Retries)
+	}
+
 	return nil
 }
