@@ -95,9 +95,14 @@ func (cm *ConfigManager) ParseConfigFile(configPath string) (*Config, error) {
 
 // TestConfig 测试配置文件 - 类似 nginx -t
 func (cm *ConfigManager) TestConfig(configPath string) error {
-	_, err := cm.ParseConfigFile(configPath)
+	cfg, err := cm.ParseConfigFile(configPath)
 	if err != nil {
 		return err
+	}
+
+	warnings := DetectShadowedRoutes(cfg.Routes)
+	for _, w := range warnings {
+		fmt.Printf("⚠ 警告: 检测到路由遮蔽: 路由 [%s] 遮蔽了路由 [%s] (%s)\n", w.ShadowRoute, w.ShadowedRoute, w.Reason)
 	}
 
 	fmt.Printf("✓ 配置文件 %s 语法正确\n", configPath)

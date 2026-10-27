@@ -68,7 +68,7 @@ func TestRouterManagerMatch(t *testing.T) {
 			Match: RouteMatch{
 				Type:     MatchExact,
 				Path:     "/api/v1/users/profile",
-				Priority: 80,
+				Priority: 100,
 			},
 			Target: TargetService{URL: "http://upstream-users-profile-exact"},
 		},
@@ -87,7 +87,7 @@ func TestRouterManagerMatch(t *testing.T) {
 			Match: RouteMatch{
 				Type:     MatchPrefix,
 				Path:     "/api/v1",
-				Priority: 85,
+				Priority: 90,
 			},
 			Target: TargetService{URL: "http://upstream-api-v1"},
 		},
@@ -96,7 +96,7 @@ func TestRouterManagerMatch(t *testing.T) {
 			Match: RouteMatch{
 				Type:     MatchPrefix,
 				Path:     "/api/v1/orders",
-				Priority: 85,
+				Priority: 90,
 			},
 			Target: TargetService{URL: "http://upstream-api-v1-orders"},
 		},
@@ -179,7 +179,7 @@ func TestRouterManagerMatch(t *testing.T) {
 				Type:     MatchPrefix,
 				Path:     "/api/versioned",
 				Headers:  map[string]string{"X-Api-Version": "v1"},
-				Priority: 50,
+				Priority: 95,
 			},
 			Target: TargetService{URL: "http://upstream-header-v1"},
 		},

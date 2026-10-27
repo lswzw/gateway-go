@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -189,8 +190,70 @@ func validateRouteConfig(config *RouteConfig) error {
 		return fmt.Errorf("无效的路由优先级: %d", config.Match.Priority)
 	}
 
-	if config.Match.Path == "" {
-		return fmt.Errorf("路由路径不能为空")
+	matchType := config.Match.Type
+	if matchType == "" {
+		matchType = "prefix"
+	}
+
+	validTypes := map[string]bool{
+		"exact":    true,
+		"prefix":   true,
+		"regex":    true,
+		"wildcard": true,
+	}
+	if !validTypes[matchType] {
+		return fmt.Errorf("路由[%s]不支持的匹配类型: %s", config.Name, config.Match.Type)
+	}
+
+	// 路径及正则/通配符校验
+	switch matchType {
+	case "regex":
+		pattern := config.Match.Regex
+		if pattern == "" {
+			pattern = config.Match.Path
+		}
+		if pattern == "" {
+			return fmt.Errorf("路由[%s]正则匹配类型缺少正则表达式", config.Name)
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("路由[%s]无效的正则表达式[%s]: %w", config.Name, pattern, err)
+		}
+	case "wildcard":
+		if config.Match.Path == "" {
+			return fmt.Errorf("路由[%s]通配符匹配类型缺少路径", config.Name)
+		}
+		regexPattern := GlobToRegex(config.Match.Path)
+		if _, err := regexp.Compile(regexPattern); err != nil {
+			return fmt.Errorf("路由[%s]无效的通配符模式[%s]: %w", config.Name, config.Match.Path, err)
+		}
+	default:
+		if config.Match.Path == "" {
+			return fmt.Errorf("路由[%s]路径不能为空", config.Name)
+		}
+	}
+
+	// A/B测试校验
+	if config.Match.ABTest != nil && config.Match.ABTest.Enabled {
+		ab := config.Match.ABTest
+		if ab.GroupATarget == "" && ab.GroupBTarget == "" {
+			return fmt.Errorf("路由[%s]启用了A/B测试但未配置目标URL", config.Name)
+		}
+		if ab.GroupATarget != "" && !strings.HasPrefix(ab.GroupATarget, "internal://") {
+			if _, err := url.Parse(ab.GroupATarget); err != nil {
+				return fmt.Errorf("路由[%s]A/B测试GroupA目标URL无效: %w", config.Name, err)
+			}
+		}
+		if ab.GroupBTarget != "" && !strings.HasPrefix(ab.GroupBTarget, "internal://") {
+			if _, err := url.Parse(ab.GroupBTarget); err != nil {
+				return fmt.Errorf("路由[%s]A/B测试GroupB目标URL无效: %w", config.Name, err)
+			}
+		}
+		if ab.WeightA < 0 || ab.WeightB < 0 {
+			return fmt.Errorf("路由[%s]A/B测试权重不能为负数", config.Name)
+		}
+		if ab.GroupA < 0 || ab.GroupB < 0 {
+			return fmt.Errorf("路由[%s]A/B测试百分比不能为负数", config.Name)
+		}
 	}
 
 	if config.Target.URL == "" {

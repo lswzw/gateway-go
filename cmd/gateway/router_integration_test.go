@@ -52,7 +52,7 @@ func TestRouterManagerLiveTraffic(t *testing.T) {
 				Match: config.RouteMatch{
 					Type:     "prefix",
 					Path:     "/api/v1",
-					Priority: 85,
+					Priority: 90,
 				},
 				Target: config.TargetConfig{
 					URL: backendV1.URL,
@@ -64,7 +64,7 @@ func TestRouterManagerLiveTraffic(t *testing.T) {
 				Match: config.RouteMatch{
 					Type:     "prefix",
 					Path:     "/api/v2",
-					Priority: 85,
+					Priority: 90,
 				},
 				Target: config.TargetConfig{
 					URL: backendV2.URL,

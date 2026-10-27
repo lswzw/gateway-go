@@ -216,6 +216,17 @@ func startServer() error {
 		return fmt.Errorf("初始化日志失败: %w", err)
 	}
 
+	// 检测路由遮蔽情况并输出告警日志 (REQ-P1-03)
+	shadowWarnings := config.DetectShadowedRoutes(cfg.Routes)
+	for _, w := range shadowWarnings {
+		logger.Warn("检测到路由遮蔽告警",
+			zap.String("shadow_route", w.ShadowRoute),
+			zap.String("shadowed_route", w.ShadowedRoute),
+			zap.String("reason", w.Reason),
+		)
+		fmt.Printf("⚠ 警告: 路由 [%s] 遮蔽了路由 [%s]: %s\n", w.ShadowRoute, w.ShadowedRoute, w.Reason)
+	}
+
 	// 初始化插件管理器
 	pluginManager = plugin.NewManager()
 

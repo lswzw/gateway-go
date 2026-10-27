@@ -53,6 +53,9 @@ type ABTestConfig struct {
 	GroupB       float64 `yaml:"group_b_percentage" json:"group_b_percentage"`
 	GroupATarget string  `yaml:"group_a_target" json:"group_a_target"`
 	GroupBTarget string  `yaml:"group_b_target" json:"group_b_target"`
+	BucketBy     string  `yaml:"bucket_by" json:"bucket_by"`
+	WeightA      int     `yaml:"weight_a" json:"weight_a"`
+	WeightB      int     `yaml:"weight_b" json:"weight_b"`
 }
 
 // RouteDefinition 路由定义 (包含目标配置与响应配置)
@@ -187,6 +190,25 @@ func (m *Manager) buildTrieAndCache() {
 			if r.Match.Type == MatchExact || r.Match.Type == MatchPrefix || r.Match.Type == "" {
 				m.trieRouter.Insert(r.Match.Path, r)
 			}
+			// 预编译正则路由
+			if r.Match.Type == MatchRegex {
+				pat := r.Match.Regex
+				if pat == "" {
+					pat = r.Match.Path
+				}
+				if pat != "" {
+					if compiled, err := regexp.Compile(pat); err == nil {
+						m.regexCache[pat] = compiled
+					}
+				}
+			}
+			// 预编译通配符路由 (转换为标准 Glob 正则)
+			if r.Match.Type == MatchWildcard && r.Match.Path != "" {
+				globPat := config.GlobToRegex(r.Match.Path)
+				if compiled, err := regexp.Compile(globPat); err == nil {
+					m.regexCache[r.Match.Path] = compiled
+				}
+			}
 		}
 	}
 	if m.routeCache == nil {
@@ -200,6 +222,20 @@ func (m *Manager) buildTrieAndCache() {
 func (m *Manager) applyConfigRoutes(cfgRoutes []config.RouteConfig) {
 	routes := make([]RouteDefinition, 0, len(cfgRoutes))
 	for _, route := range cfgRoutes {
+		var abTest *ABTestConfig
+		if route.Match.ABTest != nil {
+			abTest = &ABTestConfig{
+				Enabled:      route.Match.ABTest.Enabled,
+				GroupA:       route.Match.ABTest.GroupA,
+				GroupB:       route.Match.ABTest.GroupB,
+				GroupATarget: route.Match.ABTest.GroupATarget,
+				GroupBTarget: route.Match.ABTest.GroupBTarget,
+				BucketBy:     route.Match.ABTest.BucketBy,
+				WeightA:      route.Match.ABTest.WeightA,
+				WeightB:      route.Match.ABTest.WeightB,
+			}
+		}
+
 		routeDef := RouteDefinition{
 			Name: route.Name,
 			Target: TargetService{
@@ -212,11 +248,13 @@ func (m *Manager) applyConfigRoutes(cfgRoutes []config.RouteConfig) {
 			Match: RouteMatch{
 				Type:        RouteMatchType(route.Match.Type),
 				Path:        route.Match.Path,
+				Regex:       route.Match.Regex,
 				Priority:    route.Match.Priority,
 				Host:        route.Match.Host,
 				Method:      route.Match.Method,
 				Headers:     route.Match.Headers,
 				QueryParams: route.Match.QueryParams,
+				ABTest:      abTest,
 			},
 		}
 		routes = append(routes, routeDef)
@@ -386,24 +424,23 @@ func (m *Manager) resolveTarget(c *gin.Context, route *RouteDefinition) (*RouteD
 
 // scoreRoute 计算候选路由的匹配得分并判定是否匹配
 // 裁决规则 (REQ-P1-03):
-// 1. 更具体的 host 优先于泛化 host: 精确 host (300) > 通配符 host (200) > 无 host (100)
-// 2. 更精确/更长的路径优先: exact 末节点 (50,000,000) > prefix (按路径长度降序)
-// 3. 携带特定 Header / Query 匹配条件的路由优先于通用路由
-// 4. 同等特异性下比较 Priority 降序
+// 1. Host 作用域优先: 精确 host (300) > 通配符 host (200) > 无 host (100)
+// 2. 路由优先级 Priority 降序
+// 3. 路径特异性与长度降序: exact > regex/wildcard/prefix, 路径长度降序, Headers/QueryParams 特异性
 func (m *Manager) scoreRoute(c *gin.Context, route *RouteDefinition) (int64, bool) {
 	rule := route.Match
 	reqPath := c.Request.URL.Path
 
-	// 1. Host 匹配与得分
-	hostScore := int64(100) // 无 host 时得分为 100
+	// 1. Host 匹配与得分 (Tier 1: 精确 300, 通配 200, 无 Host 100)
+	hostTier := int64(100) // 无 host 时得分为 100
 	if rule.Host != "" {
 		if !matchHost(c.Request.Host, rule.Host) {
 			return 0, false
 		}
 		if strings.Contains(rule.Host, "*") {
-			hostScore = 200 // 通配符 host 得分为 200
+			hostTier = 200 // 通配符 host 得分为 200
 		} else {
-			hostScore = 300 // 精确 host 得分为 300
+			hostTier = 300 // 精确 host 得分为 300
 		}
 	}
 
@@ -433,24 +470,32 @@ func (m *Manager) scoreRoute(c *gin.Context, route *RouteDefinition) (int64, boo
 		return 0, false
 	}
 
-	// 路径特异性加分:
-	// 精确匹配完全命中请求路径，获得极大优先权
+	// 标准裁决层级计算 (REQ-P1-03):
+	// 1) Host exact (300) > Host wildcard (200) > No Host (100) -> 乘以 1_000_000_000_000
+	hostScore := hostTier * 1_000_000_000_000
+
+	// 2) Priority 降序 -> 乘以 1_000_000
+	priorityScore := int64(rule.Priority) * 1_000_000
+
+	// 3) 路径特异性加分 (在相同 Host 层级与 Priority 时生效):
+	// 精确匹配完全命中请求路径，获得特异性加分
 	exactBonus := int64(0)
 	if (rule.Type == MatchExact || string(rule.Type) == "exact") &&
 		(reqPath == rule.Path || strings.TrimSuffix(reqPath, "/") == strings.TrimSuffix(rule.Path, "/")) {
-		exactBonus = 50_000_000
+		exactBonus = 50_000
 	}
 
 	// 路径长度加分: 越深的前缀匹配越具体
-	pathLenBonus := int64(len(rule.Path)) * 100_000
+	pathLen := len(rule.Path)
+	if rule.Type == MatchRegex && len(rule.Regex) > pathLen {
+		pathLen = len(rule.Regex)
+	}
+	pathLenBonus := int64(pathLen) * 100
 
 	// 特异性维度 (Headers/QueryParams) 加分
-	conditionBonus := int64(len(rule.Headers)+len(rule.QueryParams)) * 10_000
+	conditionBonus := int64(len(rule.Headers)+len(rule.QueryParams)) * 1_000
 
-	// 优先级加分: [0, 1000]
-	priorityScore := int64(rule.Priority)
-
-	score := hostScore*10_000_000_000 + exactBonus + pathLenBonus + conditionBonus + priorityScore
+	score := hostScore + priorityScore + exactBonus + pathLenBonus + conditionBonus
 	return score, true
 }
 
@@ -520,7 +565,11 @@ func (m *Manager) matchPath(path string, rule RouteMatch) bool {
 		}
 		return false
 	case MatchRegex:
-		regex, err := m.getRegex(rule.Regex)
+		pat := rule.Regex
+		if pat == "" {
+			pat = rule.Path
+		}
+		regex, err := m.getRegex(pat)
 		if err != nil {
 			return false
 		}
@@ -558,52 +607,157 @@ func (m *Manager) getRegex(pattern string) (*regexp.Regexp, error) {
 	return compiled, nil
 }
 
-// matchWildcard 通配符路径匹配
+// matchWildcard 通配符路径匹配 (REQ-P1-03 支持标准 glob 语义如 /api/*/users 与 /files/*)
 func (m *Manager) matchWildcard(path, pattern string) bool {
-	regexPattern := strings.ReplaceAll(pattern, "*", ".*")
-	regexPattern = "^" + regexPattern + "$"
+	m.mu.RLock()
+	regex, exists := m.regexCache[pattern]
+	m.mu.RUnlock()
 
-	regex, err := m.getRegex(regexPattern)
+	if exists && regex != nil {
+		return regex.MatchString(path)
+	}
+
+	globPat := config.GlobToRegex(pattern)
+	compiled, err := m.getRegex(globPat)
 	if err != nil {
 		return false
 	}
 
-	return regex.MatchString(path)
+	m.mu.Lock()
+	m.regexCache[pattern] = compiled
+	m.mu.Unlock()
+
+	return compiled.MatchString(path)
 }
 
-// handleABTest 处理 A/B 测试目标选择
+// handleABTest 处理 A/B 测试目标选择 (REQ-P1-03 支持 weight/bucket)
 func (m *Manager) handleABTest(c *gin.Context, route *RouteDefinition) (*TargetService, error) {
-	bucketKey := c.GetHeader("X-Request-ID")
-	if bucketKey == "" {
-		bucketKey = c.GetHeader("X-User-ID")
+	if route.Match.ABTest == nil || !route.Match.ABTest.Enabled {
+		return &route.Target, nil
 	}
-	if bucketKey == "" {
-		var trustedProxies []string
-		if m.configManager != nil {
-			if cfg := m.configManager.GetConfig(); cfg != nil {
-				trustedProxies = cfg.Server.TrustedProxies
+
+	ab := route.Match.ABTest
+	bucketKey := ""
+
+	// 1. 根据 BucketBy 指定的方式提取分桶键
+	if ab.BucketBy != "" {
+		parts := strings.SplitN(ab.BucketBy, ":", 2)
+		category := strings.ToLower(strings.TrimSpace(parts[0]))
+		key := ""
+		if len(parts) > 1 {
+			key = strings.TrimSpace(parts[1])
+		}
+
+		switch category {
+		case "header":
+			bucketKey = c.GetHeader(key)
+		case "query":
+			bucketKey = c.Query(key)
+		case "cookie":
+			if cookie, err := c.Cookie(key); err == nil {
+				bucketKey = cookie
 			}
+		case "ip":
+			var trustedProxies []string
+			if m.configManager != nil {
+				if cfg := m.configManager.GetConfig(); cfg != nil {
+					trustedProxies = cfg.Server.TrustedProxies
+				}
+			}
+			if len(trustedProxies) == 0 {
+				trustedProxies = netutil.GetDefaultTrustedProxies()
+			}
+			bucketKey = netutil.ClientIP(c, trustedProxies)
 		}
-		if len(trustedProxies) == 0 {
-			trustedProxies = netutil.GetDefaultTrustedProxies()
+	}
+
+	// 2. 默认回退链: X-Request-ID -> X-User-ID -> ClientIP
+	if bucketKey == "" {
+		bucketKey = c.GetHeader("X-Request-ID")
+		if bucketKey == "" {
+			bucketKey = c.GetHeader("X-User-ID")
 		}
-		bucketKey = netutil.ClientIP(c, trustedProxies)
+		if bucketKey == "" {
+			var trustedProxies []string
+			if m.configManager != nil {
+				if cfg := m.configManager.GetConfig(); cfg != nil {
+					trustedProxies = cfg.Server.TrustedProxies
+				}
+			}
+			if len(trustedProxies) == 0 {
+				trustedProxies = netutil.GetDefaultTrustedProxies()
+			}
+			bucketKey = netutil.ClientIP(c, trustedProxies)
+		}
 	}
 
 	hash := m.hashString(bucketKey)
-	percentage := float64(hash%100) / 100.0
 
-	if percentage < route.Match.ABTest.GroupA {
-		return &TargetService{
-			URL: route.Match.ABTest.GroupATarget,
-		}, nil
-	} else if percentage < route.Match.ABTest.GroupA+route.Match.ABTest.GroupB {
-		return &TargetService{
-			URL: route.Match.ABTest.GroupBTarget,
-		}, nil
+	// 3. 权重 (WeightA / WeightB) 或百分比 (GroupA / GroupB) 裁决
+	if ab.WeightA > 0 || ab.WeightB > 0 {
+		totalWeight := uint32(ab.WeightA + ab.WeightB)
+		if totalWeight > 0 {
+			bucket := hash % totalWeight
+			if bucket < uint32(ab.WeightA) {
+				if ab.GroupATarget != "" {
+					return &TargetService{URL: ab.GroupATarget, Timeout: route.Target.Timeout, Retries: route.Target.Retries}, nil
+				}
+			} else {
+				if ab.GroupBTarget != "" {
+					return &TargetService{URL: ab.GroupBTarget, Timeout: route.Target.Timeout, Retries: route.Target.Retries}, nil
+				}
+			}
+		}
+	} else {
+		// 百分比模式 (兼容 0.0-1.0 与 0-100)
+		groupA := ab.GroupA
+		groupB := ab.GroupB
+		if groupA > 1.0 || groupB > 1.0 {
+			groupA = groupA / 100.0
+			groupB = groupB / 100.0
+		}
+		pct := float64(hash%10000) / 10000.0
+		if pct < groupA {
+			if ab.GroupATarget != "" {
+				return &TargetService{URL: ab.GroupATarget, Timeout: route.Target.Timeout, Retries: route.Target.Retries}, nil
+			}
+		} else if pct < groupA+groupB {
+			if ab.GroupBTarget != "" {
+				return &TargetService{URL: ab.GroupBTarget, Timeout: route.Target.Timeout, Retries: route.Target.Retries}, nil
+			}
+		}
 	}
 
 	return &route.Target, nil
+}
+
+// DetectShadowedRoutes 检测当前管理器路由表中被遮蔽的路由 (供测试与运维检查)
+func (m *Manager) DetectShadowedRoutes() []config.ShadowWarning {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.config == nil || len(m.config.Routes) == 0 {
+		return nil
+	}
+
+	cfgRoutes := make([]config.RouteConfig, 0, len(m.config.Routes))
+	for _, r := range m.config.Routes {
+		cfgRoutes = append(cfgRoutes, config.RouteConfig{
+			Name: r.Name,
+			Match: config.RouteMatch{
+				Type:        string(r.Match.Type),
+				Path:        r.Match.Path,
+				Regex:       r.Match.Regex,
+				Priority:    r.Match.Priority,
+				Host:        r.Match.Host,
+				Method:      r.Match.Method,
+				Headers:     r.Match.Headers,
+				QueryParams: r.Match.QueryParams,
+			},
+		})
+	}
+
+	return config.DetectShadowedRoutes(cfgRoutes)
 }
 
 // hashString 计算字符串哈希值

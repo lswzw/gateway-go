@@ -73,9 +73,8 @@ func (d *Dispatcher) Swap(snap *Snapshot) *Snapshot {
 	return d.snapshot.Swap(snap)
 }
 
-// ReloadMetrics 热重载监控指标 (REQ-P1-02)
-type ReloadMetrics struct {
-	mu             sync.RWMutex
+// ReloadMetricsSnapshot 热重载监控指标快照数据 (REQ-P1-02)
+type ReloadMetricsSnapshot struct {
 	TotalReloads   int64
 	SuccessReloads int64
 	FailedReloads  int64
@@ -83,6 +82,12 @@ type ReloadMetrics struct {
 	LastDuration   time.Duration
 	LastVersion    string
 	LastError      string
+}
+
+// ReloadMetrics 热重载监控指标 (REQ-P1-02)
+type ReloadMetrics struct {
+	mu sync.RWMutex
+	ReloadMetricsSnapshot
 }
 
 // RecordSuccess 记录成功的重载指标
@@ -112,10 +117,10 @@ func (rm *ReloadMetrics) RecordFailure(version string, duration time.Duration, e
 }
 
 // Get 获取当前指标快照
-func (rm *ReloadMetrics) Get() ReloadMetrics {
+func (rm *ReloadMetrics) Get() ReloadMetricsSnapshot {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
-	return *rm
+	return rm.ReloadMetricsSnapshot
 }
 
 var (
@@ -141,7 +146,7 @@ func getSnapshotGracePeriod() time.Duration {
 }
 
 // GetReloadMetrics 获取全局重载指标
-func GetReloadMetrics() ReloadMetrics {
+func GetReloadMetrics() ReloadMetricsSnapshot {
 	return globalReloadMetrics.Get()
 }
 
