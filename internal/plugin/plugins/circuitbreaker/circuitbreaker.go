@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"gateway-go/internal/metrics"
 	"gateway-go/internal/plugin/core"
 	"gateway-go/internal/response"
 
@@ -79,6 +80,7 @@ func (p *CircuitBreakerPlugin) Execute(ctx *gin.Context) error {
 
 	// 检查熔断器状态
 	if !cb.allowRequest() {
+		metrics.RecordCircuitOpen(ctx.GetString("route_name"))
 		response.RespondError(ctx, http.StatusServiceUnavailable, "服务暂时不可用", response.GetRequestID(ctx))
 		return nil
 	}

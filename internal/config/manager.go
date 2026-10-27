@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"gateway-go/internal/metrics"
+
 	"github.com/fsnotify/fsnotify"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
@@ -133,6 +135,7 @@ func (cm *ConfigManager) LoadConfig(configPath string) error {
 
 	// 更新当前配置
 	cm.currentConfig = &config
+	metrics.SetConfigVersion(config.GetVersion())
 
 	fmt.Printf("✓ 配置文件 %s 加载成功\n", configPath)
 	return nil
@@ -144,21 +147,25 @@ func (cm *ConfigManager) ReloadConfig() error {
 
 	// 测试新配置
 	if err := cm.TestConfig(cm.configPath); err != nil {
+		metrics.RecordReload("failure")
 		return fmt.Errorf("配置测试失败: %w", err)
 	}
 
 	// 加载新配置
 	if err := cm.LoadConfig(cm.configPath); err != nil {
+		metrics.RecordReload("failure")
 		return fmt.Errorf("配置加载失败: %w", err)
 	}
 
 	// 执行重载钩子
 	for _, hook := range cm.reloadHooks {
 		if err := hook(cm.currentConfig); err != nil {
+			metrics.RecordReload("failure")
 			return fmt.Errorf("重载钩子执行失败: %w", err)
 		}
 	}
 
+	metrics.RecordReload("success")
 	fmt.Println("✓ 配置重载成功")
 	return nil
 }

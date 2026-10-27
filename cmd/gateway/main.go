@@ -23,6 +23,7 @@ import (
 
 	"gateway-go/internal/config"
 	"gateway-go/internal/logger"
+	"gateway-go/internal/metrics"
 	"gateway-go/internal/netutil"
 	"gateway-go/internal/plugin"
 	"gateway-go/internal/plugin/plugins/circuitbreaker"
@@ -35,15 +36,17 @@ import (
 	"gateway-go/internal/router"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
 
 var (
-	configManager *config.ConfigManager
-	pluginManager *plugin.Manager
-	routerManager *router.Manager
-	globalServer  *http.Server
-	globalEngine  *gin.Engine
+	configManager     *config.ConfigManager
+	pluginManager     *plugin.Manager
+	routerManager     *router.Manager
+	globalServer      *http.Server
+	globalAdminServer *http.Server
+	globalEngine      *gin.Engine
 )
 
 // 命令行参数
@@ -266,9 +269,15 @@ func startServer() error {
 	// 处理系统信号
 	configManager.HandleSignals()
 
-	// 构建HTTP服务器
+	// 初始化配置版本指标 (REQ-P1-04)
+	metrics.SetConfigVersion(cfg.GetVersion())
+
+	// 构建业务 HTTP 服务器 (业务端口)
 	globalEngine = buildEngine()
 	globalServer = newHTTPServer(cfg, globalEngine)
+
+	// 构建管理 HTTP 服务器 (管理端口，物理分离 REQ-P1-04)
+	globalAdminServer = newAdminHTTPServer(cfg, configManager)
 
 	// 写入PID文件
 	pidPath := getPIDFilePath(cfg)
@@ -277,7 +286,7 @@ func startServer() error {
 	}
 	defer os.Remove(pidPath)
 
-	return runServer(context.Background(), globalServer, cfg, pluginManager, configManager)
+	return runServerWithAdmin(context.Background(), globalServer, globalAdminServer, cfg, pluginManager, configManager)
 }
 
 // newHTTPServer 根据配置构建 http.Server 实例
@@ -293,9 +302,54 @@ func newHTTPServer(cfg *config.Config, handler http.Handler) *http.Server {
 	}
 }
 
+// newAdminHandler 创建管理端口路由处理器 (REQ-P1-04)
+func newAdminHandler(isReady func() bool) http.Handler {
+	mux := http.NewServeMux()
+
+	// Prometheus 指标端点
+	mux.Handle("/metrics", promhttp.Handler())
+
+	// Liveness 探针：始终返回 200 {"status": "ok"}
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status": "ok"}`))
+	})
+
+	// Readiness 探针：配置已加载就绪返回 200 {"status": "ready"}，未就绪返回 503 {"status": "unready"}
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if isReady != nil && isReady() {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status": "ready"}`))
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status": "unready"}`))
+		}
+	})
+
+	return mux
+}
+
+// newAdminHTTPServer 根据配置构建独立的 Admin http.Server 实例 (REQ-P1-04)
+func newAdminHTTPServer(cfg *config.Config, cm *config.ConfigManager) *http.Server {
+	listenAddr := "127.0.0.1:9090"
+	if cfg != nil {
+		listenAddr = cfg.Admin.GetListen()
+	}
+	handler := newAdminHandler(func() bool {
+		return cm != nil && cm.GetConfig() != nil
+	})
+	return &http.Server{
+		Addr:    listenAddr,
+		Handler: handler,
+	}
+}
+
 // GracefulServer 封装服务器生命周期及优雅关闭
 type GracefulServer struct {
 	server        *http.Server
+	adminServer   *http.Server
 	pluginManager *plugin.Manager
 	configManager *config.ConfigManager
 	timeout       time.Duration
@@ -311,6 +365,11 @@ func NewGracefulServer(srv *http.Server, pm *plugin.Manager, cm *config.ConfigMa
 		configManager: cm,
 		timeout:       timeout,
 	}
+}
+
+// SetAdminServer 设置管理端口服务器实例
+func (gs *GracefulServer) SetAdminServer(adminSrv *http.Server) {
+	gs.adminServer = adminSrv
 }
 
 // Shutdown 优雅关闭服务器（幂等操作，多次调用不 panic）
@@ -332,14 +391,28 @@ func (gs *GracefulServer) doShutdown(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// 1. 停止接受新连接并等待在途请求处理完成
-	if err := gs.server.Shutdown(shutdownCtx); err != nil {
-		// 超时或发生错误时强制关闭所有活跃连接
-		_ = gs.server.Close()
-		shutdownErr = fmt.Errorf("server shutdown error: %w", err)
+	// 1. 停止管理服务器接受新连接并等待关闭
+	if gs.adminServer != nil {
+		if err := gs.adminServer.Shutdown(shutdownCtx); err != nil {
+			_ = gs.adminServer.Close()
+			if shutdownErr == nil {
+				shutdownErr = fmt.Errorf("admin server shutdown error: %w", err)
+			}
+		}
 	}
 
-	// 2. 停止所有插件
+	// 2. 停止业务服务器接受新连接并等待在途请求处理完成
+	if gs.server != nil {
+		if err := gs.server.Shutdown(shutdownCtx); err != nil {
+			// 超时或发生错误时强制关闭所有活跃连接
+			_ = gs.server.Close()
+			if shutdownErr == nil {
+				shutdownErr = fmt.Errorf("server shutdown error: %w", err)
+			}
+		}
+	}
+
+	// 3. 停止所有插件
 	if gs.pluginManager != nil {
 		if err := gs.pluginManager.StopAll(); err != nil {
 			if shutdownErr == nil {
@@ -348,29 +421,50 @@ func (gs *GracefulServer) doShutdown(ctx context.Context) error {
 		}
 	}
 
-	// 3. 停止配置管理器
+	// 4. 停止配置管理器
 	if gs.configManager != nil {
 		gs.configManager.Stop()
 	}
 
-	// 4. 同步日志
+	// 5. 同步日志
 	_ = logger.Sync()
 
 	return shutdownErr
 }
 
-// runServer 运行 HTTP 服务器并监听中断信号与运行错误
-func runServer(ctx context.Context, srv *http.Server, cfg *config.Config, pm *plugin.Manager, cm *config.ConfigManager) error {
-	gs := NewGracefulServer(srv, pm, cm, cfg.Server.GracefulShutdownTimeout)
-	errCh := make(chan error, 1)
+// runServerWithAdmin 运行业务与管理 HTTP 服务器并监听中断信号与运行错误 (REQ-P1-04)
+func runServerWithAdmin(ctx context.Context, srv *http.Server, adminSrv *http.Server, cfg *config.Config, pm *plugin.Manager, cm *config.ConfigManager) error {
+	var timeout time.Duration
+	if cfg != nil {
+		timeout = cfg.Server.GracefulShutdownTimeout
+	}
+	gs := NewGracefulServer(srv, pm, cm, timeout)
+	if adminSrv != nil {
+		gs.SetAdminServer(adminSrv)
+	}
+	errCh := make(chan error, 2)
 
-	// 启动 HTTP 服务，启动/运行错误通过 errCh 传递到主流程
+	// 启动业务 HTTP 服务
 	go func() {
-		fmt.Printf("启动HTTP服务器，监听端口: %d\n", cfg.Server.Port)
+		var port int
+		if cfg != nil {
+			port = cfg.Server.Port
+		}
+		fmt.Printf("启动HTTP服务器，监听端口: %d\n", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
+
+	// 启动管理 HTTP 服务 (REQ-P1-04)
+	if adminSrv != nil {
+		go func() {
+			fmt.Printf("启动Admin服务器，监听地址: %s\n", adminSrv.Addr)
+			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+	}
 
 	// 监听中断信号 (SIGINT, SIGTERM)
 	quit := make(chan os.Signal, 2)
@@ -416,6 +510,15 @@ func runServer(ctx context.Context, srv *http.Server, cfg *config.Config, pm *pl
 		fmt.Println("服务器已优雅退出")
 		return nil
 	}
+}
+
+// runServer 运行 HTTP 服务器并监听中断信号与运行错误 (向后兼容)
+func runServer(ctx context.Context, srv *http.Server, cfg *config.Config, pm *plugin.Manager, cm *config.ConfigManager) error {
+	var adminSrv *http.Server
+	if cfg != nil && cfg.Admin.Listen != "" {
+		adminSrv = newAdminHTTPServer(cfg, cm)
+	}
+	return runServerWithAdmin(ctx, srv, adminSrv, cfg, pm, cm)
 }
 
 // registerPlugins 注册所有插件
@@ -519,7 +622,9 @@ func buildEngine() *gin.Engine {
 func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 	r := gin.New()
 
-	// 注册链路最外层中间件：Access Log 与统一错误输出的 customRecovery
+	// 注册链路最外层中间件：Request ID、Metrics、Access Log 与统一错误输出的 customRecovery
+	r.Use(response.RequestIDMiddleware())
+	r.Use(metricsMiddleware())
 	r.Use(accessLogMiddleware())
 	r.Use(customRecovery())
 
@@ -536,9 +641,25 @@ func buildEngineWithConfig(cfg *config.Config) *gin.Engine {
 	}
 	netutil.SetDefaultTrustedProxies(trustedProxies)
 
-	registerConfigRoutes(r)
 	registerRoutesWithConfig(r, cfg)
 	return r
+}
+
+// metricsMiddleware 统计业务请求 Prometheus 指标中间件 (REQ-P1-04)
+func metricsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+
+		routeName := c.GetString("route_name")
+		if routeName == "" {
+			routeName = "-"
+		}
+		statusCode := c.Writer.Status()
+		if statusCode <= 0 {
+			statusCode = http.StatusOK
+		}
+		metrics.RecordRequestStatus(routeName, c.Request.Method, statusCode)
+	}
 }
 
 // reloadRoutes 重新加载路由
@@ -738,13 +859,6 @@ func buildAccessFields(c *gin.Context, cfg *config.LogConfig, startTime time.Tim
 	return fields
 }
 
-// registerConfigRoutes 注册配置管理路由
-func registerConfigRoutes(r *gin.Engine) {
-	// 健康检查路由
-	r.GET("/gatewaygo/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
-}
 
 // registerRoutes 注册业务路由
 func registerRoutes(r *gin.Engine) {
@@ -807,6 +921,14 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 		}
 
 		path := c.Request.URL.Path
+
+		// 业务端口物理隔离：管理端点严格禁止在业务端口暴露，统一返回 404 (REQ-P1-04)
+		if path == "/metrics" || path == "/healthz" || path == "/readyz" || path == "/gatewaygo/health" {
+			reqID := response.GetRequestID(c)
+			respondError(c, 404, "未找到匹配的路由", reqID)
+			return
+		}
+
 		var matchedRoute *config.RouteConfig
 
 		// 查找匹配的路由
@@ -834,8 +956,9 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 			return
 		}
 
-		// 设置目标信息到上下文
+		// 设置目标信息与路由名称到上下文
 		c.Set("target", matchedRoute.Target.URL)
+		c.Set("route_name", matchedRoute.Name)
 
 		reqID := response.GetRequestID(c)
 
@@ -935,6 +1058,7 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 			req.Header = c.Request.Header
 			req.Header.Set("X-Forwarded-Host", c.Request.Host)
 			req.Header.Set("X-Origin-Host", target.Host)
+			req.Header.Set("X-Request-ID", reqID)
 		}
 		// 设置错误处理
 		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
@@ -943,7 +1067,7 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 					zap.String("route_name", matchedRoute.Name),
 					zap.String("target_url", matchedRoute.Target.URL),
 					zap.String("request_id", reqID),
-					zap.String("error", err.Error()),
+					zap.Error(err),
 				)
 			}
 			respondError(c, http.StatusBadGateway, fmt.Sprintf("代理请求失败: %v", err), reqID)
@@ -953,14 +1077,20 @@ func registerRoutesWithConfig(r *gin.Engine, cfg *config.Config) {
 		var respStatusCode int
 		proxy.ModifyResponse = func(resp *http.Response) error {
 			respStatusCode = resp.StatusCode
+			if resp.Header.Get("X-Request-ID") == "" {
+				resp.Header.Set("X-Request-ID", reqID)
+			}
 			if resp.Body != nil {
 				respObserver = newBodyObserver(resp.Body, bodyLimit, enableSHA)
 				resp.Body = respObserver
 			}
 			return nil
 		}
-		// 执行代理请求
+		// 执行代理请求并记录上游耗时直方图 (REQ-P1-04)
+		upstreamStart := time.Now()
 		proxy.ServeHTTP(c.Writer, c.Request)
+		upstreamDuration := time.Since(upstreamStart)
+		metrics.RecordUpstreamLatency(matchedRoute.Name, upstreamDuration)
 		c.Abort()
 
 		cost := time.Since(startTime)

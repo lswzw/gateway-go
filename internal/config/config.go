@@ -11,11 +11,20 @@ import (
 
 // Config 总配置结构
 type Config struct {
+	Version string        `yaml:"version" mapstructure:"version"`
 	Server  ServerConfig  `yaml:"server" mapstructure:"server"`
 	Admin   AdminConfig   `yaml:"admin" mapstructure:"admin"`
 	Log     LogConfig     `yaml:"log" mapstructure:"log"`
 	Plugins PluginsConfig `yaml:"plugins" mapstructure:"plugins"`
 	Routes  []RouteConfig `yaml:"routes" mapstructure:"routes"`
+}
+
+// GetVersion 获取配置版本
+func (c *Config) GetVersion() string {
+	if c != nil && c.Version != "" {
+		return c.Version
+	}
+	return "1.0.0"
 }
 
 // AdminConfig 管理端口配置 (REQ-P1-04)

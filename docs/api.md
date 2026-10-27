@@ -28,15 +28,17 @@ Gateway-Go 提供了完整的 RESTful API 接口，用于配置管理、监控�
 }
 ```
 
-## 健康检查 API
+## 健康检查与管理面 API (REQ-P1-04)
 
-### 健康检查
+> 业务端口（默认 8080）已彻底移除 `/gatewaygo/health`，严格只承载反向代理流量。所有管理端点与健康探针已迁移至独立管理端口（默认 `127.0.0.1:9090`），实现物理隔离。详见 [docs/api/admin.md](admin.md)。
 
-检查系统健康状态。
+### 1. 存活探针 (Liveness Probe)
+
+检查网关实例是否存活。
 
 **请求**
 ```
-GET /gatewaygo/health
+GET http://127.0.0.1:9090/healthz
 ```
 
 **响应**
@@ -44,6 +46,31 @@ GET /gatewaygo/health
 {
   "status": "ok"
 }
+```
+
+### 2. 就绪探针 (Readiness Probe)
+
+检查网关实例是否加载配置并准备好承载流量。
+
+**请求**
+```
+GET http://127.0.0.1:9090/readyz
+```
+
+**响应**
+```json
+{
+  "status": "ready"
+}
+```
+
+### 3. Prometheus 指标端点
+
+导出 Prometheus 监控指标。
+
+**请求**
+```
+GET http://127.0.0.1:9090/metrics
 ```
 
 ## 配置管理 API
